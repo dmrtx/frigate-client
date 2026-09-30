@@ -1,0 +1,9 @@
+Generated with the built-in image_gen tool.
+
+Use case: logo-brand
+Asset type: macOS app icon, square 1024 x 1024 bitmap.
+Primary request: Create a beautiful, minimal icon for a home-security camera client called Frigate Client.
+Subject: One centered camera lens inside a simple rounded camera body, recognizable at small sizes.
+Style: Refined macOS app icon with subtly dimensional materials, crisp edges, restrained depth, and soft studio lighting.
+Composition: Front view, centered within a rounded-square icon tile, with balanced margins. A single icon, not a mockup or a grid.
+Constraints: Transparent outside the rounded-square tile. No text, letters, numbers, watermark, photographic scene, or surrounding objects.
