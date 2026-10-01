@@ -25,12 +25,20 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var nextRetry: Date?
     private(set) var certificate: CertificateRequest?
     private(set) var requiresSignIn = false
-    let webView: WKWebView
+    private(set) var webView: WKWebView
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let probeSessions = ProbeSessionPool()
     @ObservationIgnored private let healthProbe: HealthProbe
-    @ObservationIgnored private let mediaPlayback: MediaPlayback
+    @ObservationIgnored private let websiteDataStore: WKWebsiteDataStore
+    @ObservationIgnored private var mediaPlayback: MediaPlayback
+    @ObservationIgnored private var pageMonitor: Task<Void, Never>?
+    @ObservationIgnored private lazy var pageWatchdog = PageWatchdog(probe: { [weak self] reply in
+        self?.webView.evaluateJavaScript("1", in: nil, in: .defaultClient) { result in
+            if case .success(let value) = result { reply((value as? Int) == 1) }
+            else { reply(false) }
+        }
+    }, recover: { [weak self] in self?.restoreUnresponsivePage() })
     @ObservationIgnored private var servers: Servers?
     @ObservationIgnored private var monitor: Task<Void, Never>?
     @ObservationIgnored private var runID = UUID()
@@ -44,12 +52,30 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     @ObservationIgnored private var hiddenSince: Date?
     @ObservationIgnored private var pageLoadedWhileHidden = false
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, websiteDataStore: WKWebsiteDataStore = .default()) {
         self.defaults = defaults
+        self.websiteDataStore = websiteDataStore
         primary = defaults.string(forKey: "primaryURL") ?? Self.defaultPrimary
         backup = defaults.string(forKey: "backupURL") ?? Self.defaultBackup
+        let view = Self.makeWebView(dataStore: websiteDataStore)
+        webView = view
+        mediaPlayback = MediaPlayback { suspended, completion in
+            view.setAllMediaPlaybackSuspended(suspended, completionHandler: completion)
+        }
+        healthProbe = HealthProbe(cookies: WebSessionCookies(store: view.configuration.websiteDataStore.httpCookieStore))
+        super.init()
+        configureWebView()
+        pageMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(10)) } catch { return }
+                self?.checkPageResponsiveness()
+            }
+        }
+    }
+
+    private static func makeWebView(dataStore: WKWebsiteDataStore) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
+        configuration.websiteDataStore = dataStore
         configuration.mediaTypesRequiringUserActionForPlayback = []
         // Frigate's floating dashboard fullscreen control is inactive in this embedded view.
         // CSS also applies when React recreates the control during in-page navigation.
@@ -58,13 +84,10 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
             style.textContent = '.fixed.bottom-12[class~="lg:bottom-9"] .cursor-pointer:has(> svg) { display: none !important; }';
             document.head.appendChild(style);
             """, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
-        let view = WKWebView(frame: .zero, configuration: configuration)
-        webView = view
-        mediaPlayback = MediaPlayback { suspended, completion in
-            view.setAllMediaPlaybackSuspended(suspended, completionHandler: completion)
-        }
-        healthProbe = HealthProbe(cookies: WebSessionCookies(store: configuration.websiteDataStore.httpCookieStore))
-        super.init()
+        return WKWebView(frame: .zero, configuration: configuration)
+    }
+
+    private func configureWebView() {
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -85,6 +108,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         defaults.set(self.primary, forKey: "primaryURL")
         defaults.set(self.backup, forKey: "backupURL")
         servers = settings
+        pageWatchdog.reset()
         probeSessions.retainServers(settings.candidates)
         monitor?.cancel()
         runID = UUID()
@@ -128,9 +152,35 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         if state == .reconnecting && certificate == nil { reconnect() }
     }
 
+    func checkPageResponsiveness() {
+        guard viewIsVisible, state == .connected, certificate == nil, !webView.isLoading else {
+            pageWatchdog.reset()
+            return
+        }
+        pageWatchdog.check()
+    }
+
+    /// Reloading alone can keep using the process that stopped answering.
+    func restoreUnresponsivePage() {
+        guard viewIsVisible, state == .connected, certificate == nil else { return }
+        rememberCurrentPage()
+        pageWatchdog.reset()
+        webView.navigationDelegate = nil
+        webView.uiDelegate = nil
+        webView.stopLoading()
+        webView = Self.makeWebView(dataStore: websiteDataStore)
+        let view = webView
+        mediaPlayback = MediaPlayback { suspended, completion in
+            view.setAllMediaPlaybackSuspended(suspended, completionHandler: completion)
+        }
+        configureWebView()
+        reconnect()
+    }
+
     func setViewVisible(_ visible: Bool) {
         guard viewIsVisible != visible else { return }
         viewIsVisible = visible
+        pageWatchdog.reset()
         let reload = visible && ViewRecoveryPolicy.needsReload(
             hiddenSince: hiddenSince, pageLoadedWhileHidden: pageLoadedWhileHidden)
         hiddenSince = visible ? nil : .now
@@ -247,7 +297,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        guard activeServer != nil else { return }
+        guard webView === self.webView, activeServer != nil else { return }
+        pageWatchdog.reset()
         // Internal Frigate navigation has its own navigation object.
         self.navigation = navigation
         pageLoadedWhileHidden = !viewIsVisible
@@ -286,6 +337,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard webView === self.webView else { return }
+        pageWatchdog.reset()
         markOffline("Restoring the Frigate view…")
     }
 

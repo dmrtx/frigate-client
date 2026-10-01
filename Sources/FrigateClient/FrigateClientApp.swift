@@ -86,6 +86,7 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             FrigateWebView(webView: connection.webView)
+                .id(ObjectIdentifier(connection.webView))
                 .opacity(connection.state == .connected ? 1 : 0.15)
             if connection.state != .connected {
                 VStack(spacing: 16) {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Check that a visible Frigate page responds, independently of server health checks.
+- Rebuild the embedded browser after two consecutive missed page responses, keeping the same website data store and login session.
+- Cancel page checks while hidden or navigating, and ignore late replies from abandoned pages.
+
 ## 0.1.2
 
 - Keep each WebKit playback suspension paired with exactly one resume, including when a page reloads while hidden.
