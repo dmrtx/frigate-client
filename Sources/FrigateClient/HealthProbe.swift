@@ -63,8 +63,8 @@ final class HealthProbe {
 }
 
 enum ViewRecoveryPolicy {
-    static func needsReload(hiddenSince: Date?, now: Date = .now) -> Bool {
+    static func needsReload(hiddenSince: Date?, pageLoadedWhileHidden: Bool = false, now: Date = .now) -> Bool {
         guard let hiddenSince else { return false }
-        return now.timeIntervalSince(hiddenSince) >= 60
+        return pageLoadedWhileHidden || now.timeIntervalSince(hiddenSince) >= 60
     }
 }

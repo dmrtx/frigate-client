@@ -17,6 +17,11 @@ struct FrigateClientApp: App {
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) { }
+            // macOS disables its normal Hide action for accessory (menu-bar-only) apps.
+            CommandGroup(replacing: .appVisibility) {
+                Button("Hide Frigate") { connection.hideWindow() }
+                    .keyboardShortcut("h", modifiers: .command)
+            }
             CommandGroup(after: .toolbar) {
                 Button("Reconnect") { connection.reconnect() }
                     .keyboardShortcut("r", modifiers: .command)
@@ -55,6 +60,7 @@ private struct FrigateMenu: View {
         Divider()
         Button("Open Frigate", action: showWindow)
         .keyboardShortcut("o", modifiers: .command)
+        Button("Hide Frigate") { connection.hideWindow() }
         Button("Server addresses…") {
             showWindow()
             showingSettings = true
@@ -71,7 +77,6 @@ private struct FrigateMenu: View {
         openWindow(id: "main")
         NSApp.activate()
     }
-
 }
 
 struct ContentView: View {
@@ -129,7 +134,7 @@ struct ContentView: View {
             Text("\(certificate.server.url.absoluteString) uses a certificate that macOS does not recognize. Frigate usually generates its own certificate. Only this exact certificate will be remembered for this address.\n\nSHA-256: \(certificate.fingerprint)")
         }
         .task {
-            connection.setViewVisible(true)
+            refreshWindowVisibility()
             if connection.state == .idle {
                 if connection.primary.isEmpty { showingSettings = true }
                 else { _ = connection.connect() }
@@ -147,10 +152,20 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) {
             updateWindowVisibility($0, visible: true)
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)) {
+            updateWindowVisibility($0, visible: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didHideNotification)) { _ in
+            connection.setViewVisible(false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didUnhideNotification)) { _ in
+            refreshWindowVisibility()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWorkspace.didWakeNotification)) { _ in
             connection.reconnect()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshWindowVisibility()
             connection.recoverIfNeeded()
         }
     }
@@ -158,7 +173,14 @@ struct ContentView: View {
     private func updateWindowVisibility(_ notification: Notification, visible: Bool) {
         guard let window = notification.object as? NSWindow,
               window === connection.webView.window else { return }
-        connection.setViewVisible(visible)
+        if visible { refreshWindowVisibility() }
+        else { connection.setViewVisible(false) }
+    }
+
+    private func refreshWindowVisibility() {
+        guard let window = connection.webView.window else { return }
+        connection.setViewVisible(WindowPlaybackVisibility.isVisible(
+            windowIsVisible: window.isVisible, isMiniaturized: window.isMiniaturized, appIsHidden: NSApp.isHidden))
     }
 }
 

@@ -29,9 +29,9 @@ Frigate usually uses a [self-signed certificate on port 8971](https://docs.friga
 
 ## Use
 
-- The app stays in the menu bar, without a Dock icon. Choose **Open Frigate** to show the window.
+- The app stays in the menu bar, without a Dock icon. Choose **Open Frigate** to show the window, or **Hide Frigate** (`⌘H`) to hide it and pause playback.
 - The slim title bar shows a small connection dot at the right: green when connected and signed in, amber while reconnecting or when sign-in is required. Hover for details.
-- Closing or minimizing suspends media playback. Reopening or restoring resumes it automatically. After a pause of at least a minute, the app reloads the last camera page to recover stale streams. Login and logout pages are never saved as the page to restore.
+- Closing, minimizing, or explicitly hiding the app suspends media playback. A visible window keeps playing when another app is in front, including on another display. Reopening, restoring, or unhiding resumes it automatically; a minimized window stays paused when the app is unhidden. Background page reloads do not add extra playback suspensions. If a page loaded while hidden, restoring it reloads that page so blocked autoplay starts again. A pause of at least a minute also reloads the last camera page to recover stale streams. Login and logout pages are never saved as the page to restore.
 - **Reconnect** or `⌘R` immediately retries both addresses. Automatic retries increase from 2 to 30 seconds.
 - Health checks reuse network connections and run every 10 seconds while the window is open, or every 30 seconds while closed or minimized. They use the matching WebKit cookies and save Frigate's refreshed cookie back to WebKit without resuming video. Login responses (HTTP 401/403) are reachable but shown as requiring sign-in.
 - Choose **Quit Frigate** to exit completely.

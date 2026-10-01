@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2
+
+- Keep each WebKit playback suspension paired with exactly one resume, including when a page reloads while hidden.
+- Pause only when the window is closed, minimized, or the app is explicitly hidden.
+- Keep playback running when a visible window is behind another app or on another display.
+- Handle Hide/Unhide without resuming windows that remain minimized.
+- Provide a working **Hide Frigate** command (`⌘H`) for the menu bar app.
+- Reload a page created while hidden when restoring it, so blocked autoplay starts automatically.
+
 ## 0.1.1
 
 - Renew Frigate's browser session during background health checks while camera playback stays paused.

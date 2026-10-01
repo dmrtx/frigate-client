@@ -30,6 +30,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let probeSessions = ProbeSessionPool()
     @ObservationIgnored private let healthProbe: HealthProbe
+    @ObservationIgnored private let mediaPlayback: MediaPlayback
     @ObservationIgnored private var servers: Servers?
     @ObservationIgnored private var monitor: Task<Void, Never>?
     @ObservationIgnored private var runID = UUID()
@@ -41,6 +42,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     @ObservationIgnored private var loadStarted: Date?
     @ObservationIgnored private var viewIsVisible = true
     @ObservationIgnored private var hiddenSince: Date?
+    @ObservationIgnored private var pageLoadedWhileHidden = false
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -56,7 +58,11 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
             style.textContent = '.fixed.bottom-12[class~="lg:bottom-9"] .cursor-pointer:has(> svg) { display: none !important; }';
             document.head.appendChild(style);
             """, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
-        webView = WKWebView(frame: .zero, configuration: configuration)
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        webView = view
+        mediaPlayback = MediaPlayback { suspended, completion in
+            view.setAllMediaPlaybackSuspended(suspended, completionHandler: completion)
+        }
         healthProbe = HealthProbe(cookies: WebSessionCookies(store: configuration.websiteDataStore.httpCookieStore))
         super.init()
         webView.navigationDelegate = self
@@ -99,6 +105,12 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func reconnect() { _ = connect() }
 
+    func hideWindow() {
+        guard let window = webView.window else { return }
+        setViewVisible(false)
+        window.orderOut(nil)
+    }
+
     var routeName: String {
         activeServer == servers?.backup ? "Tailscale" : "Local"
     }
@@ -119,11 +131,12 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     func setViewVisible(_ visible: Bool) {
         guard viewIsVisible != visible else { return }
         viewIsVisible = visible
-        let reload = visible && ViewRecoveryPolicy.needsReload(hiddenSince: hiddenSince)
+        let reload = visible && ViewRecoveryPolicy.needsReload(
+            hiddenSince: hiddenSince, pageLoadedWhileHidden: pageLoadedWhileHidden)
         hiddenSince = visible ? nil : .now
-        webView.setAllMediaPlaybackSuspended(!visible) { [weak self] in
+        mediaPlayback.update(isVisible: visible) { [weak self] in
             guard visible, let self, self.viewIsVisible else { return }
-            if reload && self.state == .connected { self.reconnect() }
+            if reload && self.state != .idle && self.certificate == nil { self.reconnect() }
             else { self.recoverIfNeeded() }
         }
     }
@@ -237,18 +250,25 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         guard activeServer != nil else { return }
         // Internal Frigate navigation has its own navigation object.
         self.navigation = navigation
+        pageLoadedWhileHidden = !viewIsVisible
         loadStarted = Date()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard navigation === self.navigation, let server = activeServer else { return }
         if let url = webView.url, server.isRestorablePage(url) { lastPages[server.origin] = url }
-        webView.setAllMediaPlaybackSuspended(!viewIsVisible)
+        mediaPlayback.update(isVisible: viewIsVisible)
         state = .connected
         detail = ""
         failures = 0
         nextRetry = nil
         loadStarted = nil
+        if viewIsVisible && pageLoadedWhileHidden {
+            // Autoplay attempted while WebKit was suspended may never restart on resume.
+            // Create the player while visible instead of leaving that page frozen.
+            pageLoadedWhileHidden = false
+            reconnect()
+        }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
