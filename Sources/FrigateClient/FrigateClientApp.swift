@@ -51,7 +51,7 @@ private struct FrigateMenu: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Text(statusText)
+        Text(connection.statusText)
         Divider()
         Button("Open Frigate", action: showWindow)
         .keyboardShortcut("o", modifiers: .command)
@@ -72,14 +72,6 @@ private struct FrigateMenu: View {
         NSApp.activate()
     }
 
-    private var statusText: String {
-        switch connection.state {
-        case .connected: "Connected · \(connection.routeName)"
-        case .reconnecting: "Reconnecting"
-        case .idle: "Not configured"
-        case .connecting: "Connecting"
-        }
-    }
 }
 
 struct ContentView: View {
@@ -123,7 +115,7 @@ struct ContentView: View {
         .background(.background)
         .background {
             WindowStatusIndicator(state: connection.state, detail: connection.state == .connected
-                                  ? "Connected · \(connection.routeName)" : connection.detail)
+                                  ? connection.statusText : connection.detail, requiresSignIn: connection.requiresSignIn)
                 .frame(width: 0, height: 0)
         }
         .sheet(isPresented: $showingSettings) { ServerSettingsView(connection: connection) }

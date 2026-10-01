@@ -5,6 +5,7 @@ import SwiftUI
 struct WindowStatusIndicator: NSViewRepresentable {
     let state: ConnectionState
     let detail: String
+    let requiresSignIn: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -17,7 +18,7 @@ struct WindowStatusIndicator: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: WindowAnchor, context: Context) {
-        context.coordinator.update(state: state, detail: detail)
+        context.coordinator.update(state: state, detail: detail, requiresSignIn: requiresSignIn)
         context.coordinator.attach(to: nsView.window)
     }
 
@@ -47,16 +48,16 @@ struct WindowStatusIndicator: NSViewRepresentable {
             newWindow?.addTitlebarAccessoryViewController(accessory)
         }
 
-        func update(state: ConnectionState, detail: String) {
+        func update(state: ConnectionState, detail: String, requiresSignIn: Bool) {
             switch state {
-            case .connected: dot.color = .systemGreen
+            case .connected: dot.color = requiresSignIn ? .systemOrange : .systemGreen
             case .reconnecting: dot.color = .systemOrange
             case .idle, .connecting: dot.color = .secondaryLabelColor
             }
             dot.toolTip = detail
             dot.setAccessibilityElement(true)
             dot.setAccessibilityRole(.image)
-            dot.setAccessibilityLabel(state == .connected ? "Connected" :
+            dot.setAccessibilityLabel(state == .connected ? (requiresSignIn ? "Sign in required" : "Connected") :
                                       state == .reconnecting ? "Reconnecting" : "Connecting")
         }
     }

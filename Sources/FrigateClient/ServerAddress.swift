@@ -34,6 +34,14 @@ struct ServerAddress: Equatable, Sendable {
             (other.port ?? (other.scheme == "https" ? 443 : 80)) ==
             (url.port ?? (url.scheme == "https" ? 443 : 80))
     }
+
+    func isRestorablePage(_ other: URL) -> Bool {
+        let base = url.path == "/" ? "" : url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let basePath = base.isEmpty ? "" : "/" + base
+        guard contains(other), other.path == basePath || other.path.hasPrefix(basePath + "/") else { return false }
+        let path = other.path.dropFirst(basePath.count).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return !["login", "logout", "api"].contains(String(path.split(separator: "/").first ?? ""))
+    }
 }
 
 struct Servers: Equatable, Sendable {

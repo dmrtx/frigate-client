@@ -18,13 +18,20 @@ enum ServerTrust {
 }
 
 /// A probe can reuse only the exact certificate approved for this server.
-final class ProbeTrustDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+final class ProbeTrustDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     let server: ServerAddress
     let fingerprint: String?
 
     init(server: ServerAddress, fingerprint: String?) {
         self.server = server
         self.fingerprint = fingerprint
+    }
+
+    // A health probe carries origin-scoped browser cookies; never forward them on redirects.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,

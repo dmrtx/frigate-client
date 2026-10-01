@@ -23,20 +23,22 @@ Both address fields start empty. Use the menu bar's camera icon → **Server add
 
 These are placeholders. Replace them with your own server's local address and, optionally, its Tailscale address. Your Mac must be connected to the appropriate tailnet to use Tailscale.
 
-The app tries the primary address first, then the backup. Sign in through Frigate's interface. Each address has its own session, so you may need to sign in once at each address.
+The app tries the primary address first, then the backup. If the primary needs a login and the backup has a valid session, it uses the backup. Sign in through Frigate's interface. Each address has its own session, so you may need to sign in once at each address.
 
 Frigate usually uses a [self-signed certificate on port 8971](https://docs.frigate.video/configuration/tls/). On first connection, the app asks you to approve its SHA-256 fingerprint. Only that exact certificate is remembered for that address and port. A changed self-signed certificate requires approval again. Valid certificates are verified by macOS.
 
 ## Use
 
 - The app stays in the menu bar, without a Dock icon. Choose **Open Frigate** to show the window.
-- The slim title bar shows a small connection dot at the right: green when connected, amber while reconnecting. Hover for details.
-- Closing or minimizing suspends media playback. Reopening or restoring resumes it automatically, preserving the current page and login session.
+- The slim title bar shows a small connection dot at the right: green when connected and signed in, amber while reconnecting or when sign-in is required. Hover for details.
+- Closing or minimizing suspends media playback. Reopening or restoring resumes it automatically. After a pause of at least a minute, the app reloads the last camera page to recover stale streams. Login and logout pages are never saved as the page to restore.
 - **Reconnect** or `⌘R` immediately retries both addresses. Automatic retries increase from 2 to 30 seconds.
-- Health checks reuse network connections and run every 10 seconds while the window is open, or every 30 seconds while closed or minimized. Login responses (HTTP 401/403) are treated as reachable.
+- Health checks reuse network connections and run every 10 seconds while the window is open, or every 30 seconds while closed or minimized. They use the matching WebKit cookies and save Frigate's refreshed cookie back to WebKit without resuming video. Login responses (HTTP 401/403) are reachable but shown as requiring sign-in.
 - Choose **Quit Frigate** to exit completely.
 
 The inactive floating fullscreen control on Frigate's camera dashboard is hidden in the client. Use the green macOS window button for fullscreen.
+
+Frigate's [default session expires after 24 hours](https://docs.frigate.video/configuration/authentication/) and renews through authenticated requests before expiry. The app keeps renewing while running and connected, including with its window closed. If you quit the app, your Mac sleeps, or the server stays unreachable until the session expires, Frigate requires another sign-in. The client cannot renew an already expired session. Signing out remains effective.
 
 ## Local data
 

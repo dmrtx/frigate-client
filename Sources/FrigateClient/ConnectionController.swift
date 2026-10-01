@@ -24,10 +24,12 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var detail = "Add your Frigate server address to get started."
     private(set) var nextRetry: Date?
     private(set) var certificate: CertificateRequest?
+    private(set) var requiresSignIn = false
     let webView: WKWebView
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let probeSessions = ProbeSessionPool()
+    @ObservationIgnored private let healthProbe: HealthProbe
     @ObservationIgnored private var servers: Servers?
     @ObservationIgnored private var monitor: Task<Void, Never>?
     @ObservationIgnored private var runID = UUID()
@@ -38,6 +40,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     @ObservationIgnored private var finishTrust: ((Bool) -> Void)?
     @ObservationIgnored private var loadStarted: Date?
     @ObservationIgnored private var viewIsVisible = true
+    @ObservationIgnored private var hiddenSince: Date?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -54,6 +57,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
             document.head.appendChild(style);
             """, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         webView = WKWebView(frame: .zero, configuration: configuration)
+        healthProbe = HealthProbe(cookies: WebSessionCookies(store: configuration.websiteDataStore.httpCookieStore))
         super.init()
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -99,6 +103,15 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         activeServer == servers?.backup ? "Tailscale" : "Local"
     }
 
+    var statusText: String {
+        switch state {
+        case .connected: requiresSignIn ? "Sign in required · \(routeName)" : "Connected · \(routeName)"
+        case .reconnecting: "Reconnecting"
+        case .idle: "Not configured"
+        case .connecting: "Connecting"
+        }
+    }
+
     func recoverIfNeeded() {
         if state == .reconnecting && certificate == nil { reconnect() }
     }
@@ -106,9 +119,12 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     func setViewVisible(_ visible: Bool) {
         guard viewIsVisible != visible else { return }
         viewIsVisible = visible
+        let reload = visible && ViewRecoveryPolicy.needsReload(hiddenSince: hiddenSince)
+        hiddenSince = visible ? nil : .now
         webView.setAllMediaPlaybackSuspended(!visible) { [weak self] in
             guard visible, let self, self.viewIsVisible else { return }
-            self.recoverIfNeeded()
+            if reload && self.state == .connected { self.reconnect() }
+            else { self.recoverIfNeeded() }
         }
     }
 
@@ -134,6 +150,16 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
                 guard !Task.isCancelled, id == runID else { return }
                 if case .unavailable(let message) = result { markOffline(message) }
                 else if case .needsTrust = result { markOffline("The server certificate changed.") }
+                else if case .available(let authenticated) = result {
+                    if !authenticated && !requiresSignIn {
+                        // An expired session can leave React displaying stale camera content.
+                        // Try another signed-in address, or show Frigate's login page once.
+                        reconnect()
+                    } else if authenticated && requiresSignIn {
+                        requiresSignIn = false
+                        if let url = webView.url, !activeServer.isRestorablePage(url) { reconnect() }
+                    }
+                }
             case .reconnecting:
                 nextRetry = nil
                 await attemptConnection(id: id)
@@ -150,47 +176,29 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     private func attemptConnection(id: UUID) async {
         guard let servers else { return }
-        var message = "Frigate is unavailable."
-        for server in servers.candidates where !rejectedServers.contains(server.origin) {
-            let result = await probe(server)
-            guard !Task.isCancelled, id == runID else { return }
-            switch result {
-            case .available, .needsTrust:
-                activeServer = server
-                state = .connecting
-                detail = server == servers.primary ? "Connecting over the local network…" : "Connecting over Tailscale…"
-                nextRetry = nil
-                loadStarted = Date()
-                let page = lastPages[server.origin] ?? server.url
-                navigation = webView.load(URLRequest(url: page, cachePolicy: .reloadIgnoringLocalCacheData,
-                                                     timeoutInterval: 12))
-                return
-            case .unavailable(let error): message = error
-            }
+        let selection = await healthProbe.selectServer(
+            from: servers.candidates.filter { !rejectedServers.contains($0.origin) },
+            session: { probeSessions.session(for: $0, fingerprint: trustedFingerprint(for: $0)) })
+        guard !Task.isCancelled, id == runID else { return }
+        guard let server = selection.server else {
+            if case .unavailable(let message) = selection.result { markOffline(message) }
+            failures += 1
+            return
         }
-        markOffline(message)
-        failures += 1
+        activeServer = server
+        requiresSignIn = selection.result == .available(authenticated: false)
+        state = .connecting
+        detail = server == servers.primary ? "Connecting over the local network…" : "Connecting over Tailscale…"
+        nextRetry = nil
+        loadStarted = Date()
+        let page = lastPages[server.origin].flatMap { server.isRestorablePage($0) ? $0 : nil } ?? server.url
+        navigation = webView.load(URLRequest(url: page, cachePolicy: .reloadIgnoringLocalCacheData,
+                                             timeoutInterval: 12))
     }
 
-    private enum ProbeResult { case available, needsTrust, unavailable(String) }
-
-    private func probe(_ server: ServerAddress) async -> ProbeResult {
+    private func probe(_ server: ServerAddress) async -> HealthProbe.Result {
         let session = probeSessions.session(for: server, fingerprint: trustedFingerprint(for: server))
-        do {
-            let (_, response) = try await session.data(for: URLRequest(url: server.healthURL,
-                                                                      cachePolicy: .reloadIgnoringLocalCacheData))
-            guard let http = response as? HTTPURLResponse else {
-                return .unavailable("The server returned an invalid response.")
-            }
-            return RetryPolicy.isReachable(status: http.statusCode)
-                ? .available : .unavailable("Frigate returned error \(http.statusCode).")
-        } catch {
-            let code = (error as NSError).code
-            let trustErrors = [NSURLErrorServerCertificateUntrusted, NSURLErrorServerCertificateHasBadDate,
-                               NSURLErrorServerCertificateHasUnknownRoot, NSURLErrorServerCertificateNotYetValid]
-            if (error as NSError).domain == NSURLErrorDomain && trustErrors.contains(code) { return .needsTrust }
-            return .unavailable("Could not connect to Frigate.")
-        }
+        return await healthProbe.check(server, session: session)
     }
 
     private func markOffline(_ message: String) {
@@ -201,7 +209,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     private func rememberCurrentPage() {
-        if let server = activeServer, let url = webView.url, server.contains(url) {
+        if let server = activeServer, let url = webView.url, server.isRestorablePage(url) {
             lastPages[server.origin] = url
         }
     }
@@ -234,7 +242,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard navigation === self.navigation, let server = activeServer else { return }
-        if let url = webView.url, server.contains(url) { lastPages[server.origin] = url }
+        if let url = webView.url, server.isRestorablePage(url) { lastPages[server.origin] = url }
+        webView.setAllMediaPlaybackSuspended(!viewIsVisible)
         state = .connected
         detail = ""
         failures = 0
