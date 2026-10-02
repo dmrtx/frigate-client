@@ -119,6 +119,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         mediaPlayback = MediaPlayback { suspended, completion in
             view.setAllMediaPlaybackSuspended(suspended, completionHandler: completion)
         }
+        // Suspend before load can create autoplaying media, including reconnections while hidden.
+        mediaPlayback?.update(isVisible: viewIsVisible)
         view.navigationDelegate = self
         view.uiDelegate = self
         view.allowsBackForwardNavigationGestures = true
