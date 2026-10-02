@@ -74,8 +74,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>NSLocalNetworkUsageDescription</key><string>Connect to your Frigate server on the local network.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
-        <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
-        <key>NSAllowsLocalNetworking</key><true/>
+        <!-- Specific ATS exceptions override the general one and would block native HTTP probes. -->
         <key>NSAllowsArbitraryLoads</key><true/>
     </dict>
 </dict>
