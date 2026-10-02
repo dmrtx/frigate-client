@@ -15,6 +15,7 @@ Both addresses remain editable through **Server addresses…** in the menu bar. 
 ## Behavior
 
 - Frigate's web dashboard handles camera layout, stream selection, and playback. The app has no separate native camera player or camera-count limit.
+- Two-way talk requests microphone permission only for your configured server. WebKit asks for your choice; camera capture and other origins are denied. Two-way talk requires a secure context and a compatible camera. If microphone permission was denied, enable it in macOS System Settings > Privacy & Security > Microphone. Receiving video/audio does not request microphone access.
 - Dashboard downloads, attachments, and blob exports use a native Save dialog. Completion and errors appear in the app; canceling a save keeps the dashboard connected.
 - The app stays in the menu bar and has no Dock icon. **Open Frigate** shows its window; **Quit Frigate** exits completely.
 - The slim title bar has a connection indicator on the right. The inactive floating dashboard fullscreen control is hidden; use the green macOS window button for fullscreen.
