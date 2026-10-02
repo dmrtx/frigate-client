@@ -488,6 +488,14 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         return nil
     }
 
+    func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
+                 decisionHandler: @escaping @MainActor @Sendable (WKPermissionDecision) -> Void) {
+        guard webView === self.webView else { decisionHandler(.deny); return }
+        decisionHandler(MediaCapturePolicy.decision(server: activeServer, origin: CaptureOrigin(origin),
+                                                    frameOrigin: CaptureOrigin(frame.securityOrigin), type: type))
+    }
+
     func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
                  completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,

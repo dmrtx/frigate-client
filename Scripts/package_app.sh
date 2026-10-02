@@ -72,6 +72,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>BuildTimestamp</key><string>${BUILD_TIMESTAMP}</string>
     <key>GitCommit</key><string>${GIT_COMMIT}</string>
     <key>NSLocalNetworkUsageDescription</key><string>Connect to your Frigate server on the local network.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Use the microphone for two-way talk with cameras on your configured Frigate server.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <!-- Specific ATS exceptions override the general one and would block native HTTP probes. -->
@@ -173,21 +174,24 @@ xattr -cr "$APP"
 find "$APP" -name '._*' -delete
 
 ENTITLEMENTS_DIR="$ROOT/.build/entitlements"
-DEFAULT_ENTITLEMENTS="$ENTITLEMENTS_DIR/${APP_NAME}.entitlements"
 mkdir -p "$ENTITLEMENTS_DIR"
 
-APP_ENTITLEMENTS=${APP_ENTITLEMENTS:-$DEFAULT_ENTITLEMENTS}
-if [[ ! -f "$APP_ENTITLEMENTS" ]]; then
-  cat > "$APP_ENTITLEMENTS" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <!-- Add entitlements here if needed. -->
-</dict>
-</plist>
-PLIST
-fi
+# Rebuild defaults on every run, including installations with an older cached empty plist.
+# Merge into a generated signing file so custom entitlement sources are preserved.
+SIGNING_ENTITLEMENTS="$ENTITLEMENTS_DIR/${APP_NAME}-signing.entitlements"
+python3 - "${APP_ENTITLEMENTS:-}" "$SIGNING_ENTITLEMENTS" <<'PYTHON'
+import plistlib, sys
+source, destination = sys.argv[1:]
+entitlements = {}
+if source:
+    with open(source, 'rb') as f:
+        entitlements = plistlib.load(f)
+entitlements['com.apple.security.device.audio-input'] = True
+if entitlements.get('com.apple.security.app-sandbox'):
+    entitlements['com.apple.security.device.microphone'] = True
+with open(destination, 'wb') as f:
+    plistlib.dump(entitlements, f)
+PYTHON
 
 if [[ "$SIGNING_MODE" == "adhoc" || -z "$APP_IDENTITY" ]]; then
   CODESIGN_ARGS=(--force --sign "-")
@@ -211,7 +215,7 @@ sign_frameworks() {
 sign_frameworks
 
 codesign "${CODESIGN_ARGS[@]}" \
-  --entitlements "$APP_ENTITLEMENTS" \
+  --entitlements "$SIGNING_ENTITLEMENTS" \
   "$APP"
 
 echo "Created $APP"
