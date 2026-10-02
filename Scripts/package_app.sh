@@ -146,13 +146,9 @@ fi
 
 # SwiftPM resource bundles are emitted next to the built binary.
 PREFERRED_BUILD_DIR="$(dirname "$(build_product_path "$APP_NAME" "${ARCH_LIST[0]}")")"
-shopt -s nullglob
-SWIFTPM_BUNDLES=("${PREFERRED_BUILD_DIR}/"*.bundle)
-shopt -u nullglob
-if [[ ${#SWIFTPM_BUNDLES[@]} -gt 0 ]]; then
-  for bundle in "${SWIFTPM_BUNDLES[@]}"; do
-    cp -R "$bundle" "$APP/Contents/Resources/"
-  done
+SWIFTPM_BUNDLE="${PREFERRED_BUILD_DIR}/${APP_NAME}_${APP_NAME}.bundle"
+if [[ -d "$SWIFTPM_BUNDLE" ]]; then
+  cp -R "$SWIFTPM_BUNDLE" "$APP/Contents/Resources/"
 fi
 
 # Embed frameworks if any exist in the build folder.

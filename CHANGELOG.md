@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 — native live-view preview
+
+- Add optional video-only native playback for a selected camera, using Frigate's authenticated MSE stream and Apple's video renderer.
+- Decode H.264 and H.265 without dashboard JavaScript, external dependencies, additional server ports, or client-side transcoding.
+- Keep existing sign-in, cookie renewal, certificate approval, and primary/backup server selection.
+- Close native streams when hidden, closed, or minimized, and reconnect when shown. Visible windows continue playing behind other apps.
+- Allow time for the initial keyframe and bound recovery attempts after stalled or disconnected streams.
+- Cap repeated dashboard-page rebuilds and unload a repeatedly stalled page until manual reconnection.
+- Exercise native decode, stream disconnection, stalled-stream recovery limits, hide/resume, backup failover, and session-preserving browser recovery.
+- Exclude test resource bundles from packaged apps.
+
+Native mode is a preview and remains off until enabled from the menu bar. Live-server testing found intermittent missing video after a successful handshake; controlled playback passes, but all-day behavior on other Macs is not verified.
+
 ## 0.1.3
 
 - Check that a visible Frigate page responds, independently of server health checks.

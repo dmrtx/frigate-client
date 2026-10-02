@@ -6,6 +6,7 @@ struct WindowStatusIndicator: NSViewRepresentable {
     let state: ConnectionState
     let detail: String
     let requiresSignIn: Bool
+    var onWindowChanged: (NSWindow?) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -13,6 +14,7 @@ struct WindowStatusIndicator: NSViewRepresentable {
         let anchor = WindowAnchor()
         anchor.onWindowChanged = { [weak coordinator = context.coordinator] window in
             coordinator?.attach(to: window)
+            onWindowChanged(window)
         }
         return anchor
     }
@@ -20,6 +22,7 @@ struct WindowStatusIndicator: NSViewRepresentable {
     func updateNSView(_ nsView: WindowAnchor, context: Context) {
         context.coordinator.update(state: state, detail: detail, requiresSignIn: requiresSignIn)
         context.coordinator.attach(to: nsView.window)
+        onWindowChanged(nsView.window)
     }
 
     static func dismantleNSView(_ nsView: WindowAnchor, coordinator: Coordinator) {

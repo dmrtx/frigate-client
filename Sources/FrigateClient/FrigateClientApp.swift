@@ -68,6 +68,8 @@ private struct FrigateMenu: View {
         .keyboardShortcut(",", modifiers: .command)
         Button("Reconnect") { connection.reconnect() }
             .disabled(connection.primary.isEmpty)
+        Toggle("Native live view (preview)", isOn: Binding(get: { connection.nativeEnabled },
+            set: { connection.setNativeEnabled($0) }))
         Divider()
         Button("Quit Frigate") { NSApp.terminate(nil) }
             .keyboardShortcut("q", modifiers: .command)
@@ -85,15 +87,19 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            FrigateWebView(webView: connection.webView)
-                .id(ObjectIdentifier(connection.webView))
-                .opacity(connection.state == .connected ? 1 : 0.15)
-            if connection.state != .connected {
+            if connection.nativeEnabled && !connection.requiresSignIn {
+                NativeLiveView(connection: connection)
+            } else {
+                FrigateWebView(webView: connection.webView)
+                    .id(ObjectIdentifier(connection.webView))
+                    .opacity(connection.state == .connected ? 1 : 0.15)
+            }
+            if connection.state != .connected || connection.pageRecoveryPaused {
                 VStack(spacing: 16) {
                     Image(systemName: "video")
                         .font(.system(size: 40, weight: .light))
                         .foregroundStyle(.secondary)
-                    Text(connection.state == .idle ? "Set up Frigate" :
+                    Text(connection.pageRecoveryPaused ? "Page recovery paused" : connection.state == .idle ? "Set up Frigate" :
                          connection.state == .reconnecting ? "Waiting for Frigate" : "Connecting to Frigate")
                         .font(.title2.weight(.medium))
                     Text(connection.detail).foregroundStyle(.secondary)
@@ -120,8 +126,9 @@ struct ContentView: View {
         }
         .background(.background)
         .background {
-            WindowStatusIndicator(state: connection.state, detail: connection.state == .connected
-                                  ? connection.statusText : connection.detail, requiresSignIn: connection.requiresSignIn)
+            WindowStatusIndicator(state: connection.indicatorState, detail: connection.state == .connected
+                                  ? connection.statusText : connection.detail, requiresSignIn: connection.requiresSignIn,
+                                  onWindowChanged: { connection.window = $0 })
                 .frame(width: 0, height: 0)
         }
         .sheet(isPresented: $showingSettings) { ServerSettingsView(connection: connection) }
@@ -173,13 +180,13 @@ struct ContentView: View {
 
     private func updateWindowVisibility(_ notification: Notification, visible: Bool) {
         guard let window = notification.object as? NSWindow,
-              window === connection.webView.window else { return }
+              window === connection.window else { return }
         if visible { refreshWindowVisibility() }
         else { connection.setViewVisible(false) }
     }
 
     private func refreshWindowVisibility() {
-        guard let window = connection.webView.window else { return }
+        guard let window = connection.window else { return }
         connection.setViewVisible(WindowPlaybackVisibility.isVisible(
             windowIsVisible: window.isVisible, isMiniaturized: window.isMiniaturized, appIsHidden: NSApp.isHidden))
     }
@@ -189,6 +196,34 @@ private struct FrigateWebView: NSViewRepresentable {
     let webView: WKWebView
     func makeNSView(context: Context) -> WKWebView { webView }
     func updateNSView(_ nsView: WKWebView, context: Context) { }
+}
+
+private struct NativeLiveView: View {
+    let connection: ConnectionController
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            NativeVideoSurface(renderer: connection.nativePlayer.renderer)
+            if !connection.nativePlayer.isPlaying && connection.state == .connected {
+                VStack(spacing: 12) {
+                    Text(connection.cameras.isEmpty ? "No enabled cameras were found." : connection.nativePlayer.message)
+                        .foregroundStyle(.white.opacity(0.8))
+                    if connection.nativePlayer.recoveryPaused {
+                        Button("Reconnect") { connection.reconnect() }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if connection.state == .connected, !connection.cameras.isEmpty {
+                Picker("Camera", selection: Binding(get: { connection.selectedCamera }, set: { connection.selectCamera($0) })) {
+                    ForEach(connection.cameras) { camera in Text(camera.name).tag(camera.name) }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .padding(8)
+            }
+        }
+        .background(.black)
+    }
 }
 
 private struct ServerSettingsView: View {

@@ -10,6 +10,6 @@ let package = Package(
         .executableTarget(
             name: "FrigateClient",
             path: "Sources/FrigateClient"),
-        .testTarget(name: "FrigateClientTests", dependencies: ["FrigateClient"])
+        .testTarget(name: "FrigateClientTests", dependencies: ["FrigateClient"], resources: [.copy("Resources")])
     ]
 )

@@ -69,7 +69,10 @@ private final class PageFixture: @unchecked Sendable {
         listener.start(queue: queue)
     }
 
-    var port: UInt16? { listener.port?.rawValue }
+    var port: UInt16? {
+        guard let port = listener.port?.rawValue, port > 0 else { return nil }
+        return port
+    }
     var receivedSession: Bool { queue.sync { sawSession } }
     func stop() { listener.cancel() }
 
@@ -117,6 +120,7 @@ private func stallPage(_ view: WKWebView) {
         .domain: "127.0.0.1", .path: "/", .expires: Date.now.addingTimeInterval(3600)])!
     await store.httpCookieStore.setCookie(session)
     let connection = ConnectionController(defaults: defaults, websiteDataStore: store)
+    connection.setNativeEnabled(false)
     #expect(connection.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
     try await eventually { connection.state == .connected }
     let oldView = connection.webView // SwiftUI can retain the old view until its next update.
@@ -135,4 +139,32 @@ private func stallPage(_ view: WKWebView) {
     #expect(result as? String == "Responsive")
     #expect(oldView !== connection.webView)
     connection.setViewVisible(false)
+}
+
+@MainActor @Test func repeatedPageStallsUnloadThePageUntilManualReconnect() async throws {
+    let fixture = try PageFixture()
+    defer { fixture.stop() }
+    try await eventually { fixture.port != nil }
+    let suite = "PageRecoveryBudgetTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let connection = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent())
+    #expect(connection.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
+    defer { connection.setViewVisible(false) }
+    try await eventually { connection.state == .connected }
+    for _ in 0..<3 {
+        connection.restoreUnresponsivePage()
+        try await eventually { connection.state == .connected }
+        #expect(!connection.pageRecoveryPaused)
+    }
+    connection.restoreUnresponsivePage()
+    #expect(connection.pageRecoveryPaused)
+    #expect(connection.webView.url == nil)
+    #expect(connection.indicatorState == .reconnecting)
+    connection.checkPageResponsiveness()
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(connection.pageRecoveryPaused)
+    connection.reconnect()
+    try await eventually { connection.state == .connected && connection.webView.url != nil }
+    #expect(!connection.pageRecoveryPaused)
 }

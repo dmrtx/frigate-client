@@ -25,6 +25,12 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var nextRetry: Date?
     private(set) var certificate: CertificateRequest?
     private(set) var requiresSignIn = false
+    private(set) var pageRecoveryPaused = false
+    private(set) var nativeEnabled: Bool
+    private(set) var cameras: [LiveCamera] = []
+    private(set) var selectedCamera = ""
+    let nativePlayer: NativeLivePlayer
+    @ObservationIgnored weak var window: NSWindow?
     private(set) var webView: WKWebView
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -33,6 +39,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     @ObservationIgnored private let websiteDataStore: WKWebsiteDataStore
     @ObservationIgnored private var mediaPlayback: MediaPlayback
     @ObservationIgnored private var pageMonitor: Task<Void, Never>?
+    @ObservationIgnored private var pageRecoveryBudget = StreamRetryBudget()
     @ObservationIgnored private lazy var pageWatchdog = PageWatchdog(probe: { [weak self] reply in
         self?.webView.evaluateJavaScript("1", in: nil, in: .defaultClient) { result in
             if case .success(let value) = result { reply((value as? Int) == 1) }
@@ -55,6 +62,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     init(defaults: UserDefaults = .standard, websiteDataStore: WKWebsiteDataStore = .default()) {
         self.defaults = defaults
         self.websiteDataStore = websiteDataStore
+        nativeEnabled = defaults.object(forKey: "nativeLiveEnabled") as? Bool ?? false
+        nativePlayer = NativeLivePlayer(store: websiteDataStore.httpCookieStore)
         primary = defaults.string(forKey: "primaryURL") ?? Self.defaultPrimary
         backup = defaults.string(forKey: "backupURL") ?? Self.defaultBackup
         let view = Self.makeWebView(dataStore: websiteDataStore)
@@ -97,7 +106,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     @discardableResult
-    func connect(primary: String? = nil, backup: String? = nil) -> String? {
+    func connect(primary: String? = nil, backup: String? = nil, resetPageRecovery: Bool = true) -> String? {
         let settings: Servers
         do {
             settings = try Servers(primary: primary ?? self.primary, backup: backup ?? self.backup)
@@ -108,6 +117,9 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         defaults.set(self.primary, forKey: "primaryURL")
         defaults.set(self.backup, forKey: "backupURL")
         servers = settings
+        if resetPageRecovery { pageRecoveryBudget.reset() }
+        pageRecoveryPaused = false
+        nativePlayer.stop()
         pageWatchdog.reset()
         probeSessions.retainServers(settings.candidates)
         monitor?.cancel()
@@ -129,8 +141,29 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func reconnect() { _ = connect() }
 
+    func setNativeEnabled(_ enabled: Bool) {
+        guard nativeEnabled != enabled else { return }
+        nativeEnabled = enabled
+        defaults.set(enabled, forKey: "nativeLiveEnabled")
+        replaceWebView()
+        if state != .idle { reconnect() }
+    }
+
+    func selectCamera(_ name: String) {
+        guard cameras.contains(where: { $0.name == name }) else { return }
+        selectedCamera = name
+        defaults.set(name, forKey: "nativeCamera")
+        startNativePlayback()
+    }
+
+    private func startNativePlayback() {
+        guard nativeEnabled, !requiresSignIn, viewIsVisible, let activeServer,
+              let camera = cameras.first(where: { $0.name == selectedCamera }), let stream = camera.streams.first else { return }
+        nativePlayer.start(server: activeServer, stream: stream, fingerprint: trustedFingerprint(for: activeServer))
+    }
+
     func hideWindow() {
-        guard let window = webView.window else { return }
+        guard let window else { return }
         setViewVisible(false)
         window.orderOut(nil)
     }
@@ -141,11 +174,19 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     var statusText: String {
         switch state {
-        case .connected: requiresSignIn ? "Sign in required · \(routeName)" : "Connected · \(routeName)"
-        case .reconnecting: "Reconnecting"
-        case .idle: "Not configured"
-        case .connecting: "Connecting"
+        case .connected:
+            if pageRecoveryPaused { return "Page recovery paused" }
+            if requiresSignIn { return "Sign in required · \(routeName)" }
+            if nativeEnabled { return nativePlayer.isPlaying ? "Live · \(routeName)" : nativePlayer.message }
+            return "Connected · \(routeName)"
+        case .reconnecting: return "Reconnecting"
+        case .idle: return "Not configured"
+        case .connecting: return "Connecting"
         }
+    }
+
+    var indicatorState: ConnectionState {
+        pageRecoveryPaused || (state == .connected && nativeEnabled && !requiresSignIn && !nativePlayer.isPlaying) ? .reconnecting : state
     }
 
     func recoverIfNeeded() {
@@ -153,7 +194,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func checkPageResponsiveness() {
-        guard viewIsVisible, state == .connected, certificate == nil, !webView.isLoading else {
+        guard !pageRecoveryPaused, (!nativeEnabled || requiresSignIn), viewIsVisible, state == .connected, certificate == nil, !webView.isLoading else {
             pageWatchdog.reset()
             return
         }
@@ -162,9 +203,19 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     /// Reloading alone can keep using the process that stopped answering.
     func restoreUnresponsivePage() {
-        guard viewIsVisible, state == .connected, certificate == nil else { return }
+        guard !pageRecoveryPaused, viewIsVisible, state == .connected, certificate == nil else { return }
         rememberCurrentPage()
         pageWatchdog.reset()
+        replaceWebView()
+        guard pageRecoveryBudget.retry() != nil else {
+            pageRecoveryPaused = true
+            detail = "Page recovery paused after repeated stalls. Choose Reconnect to try again."
+            return
+        }
+        _ = connect(resetPageRecovery: false)
+    }
+
+    private func replaceWebView() {
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
         webView.stopLoading()
@@ -174,13 +225,18 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
             view.setAllMediaPlaybackSuspended(suspended, completionHandler: completion)
         }
         configureWebView()
-        reconnect()
     }
 
     func setViewVisible(_ visible: Bool) {
         guard viewIsVisible != visible else { return }
         viewIsVisible = visible
         pageWatchdog.reset()
+        if nativeEnabled && !requiresSignIn {
+            if visible { startNativePlayback(); recoverIfNeeded() }
+            else { nativePlayer.stop() }
+            hiddenSince = visible ? nil : .now
+            return
+        }
         let reload = visible && ViewRecoveryPolicy.needsReload(
             hiddenSince: hiddenSince, pageLoadedWhileHidden: pageLoadedWhileHidden)
         hiddenSince = visible ? nil : .now
@@ -220,7 +276,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
                         reconnect()
                     } else if authenticated && requiresSignIn {
                         requiresSignIn = false
-                        if let url = webView.url, !activeServer.isRestorablePage(url) { reconnect() }
+                        if nativeEnabled { reconnect() }
+                        else if let url = webView.url, !activeServer.isRestorablePage(url) { reconnect() }
                     }
                 }
             case .reconnecting:
@@ -249,11 +306,43 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
             return
         }
         activeServer = server
-        requiresSignIn = selection.result == .available(authenticated: false)
+        requiresSignIn = selection.result == .available(authenticated: false) || selection.result == .needsTrust
         state = .connecting
         detail = server == servers.primary ? "Connecting over the local network…" : "Connecting over Tailscale…"
         nextRetry = nil
         loadStarted = Date()
+        if nativeEnabled && !requiresSignIn {
+            do {
+                let cookieBridge = WebSessionCookies(store: websiteDataStore.httpCookieStore)
+                let url = server.url.appendingPathComponent("api/config")
+                let sent = await cookieBridge.cookies(for: url)
+                guard !Task.isCancelled, id == runID else { return }
+                var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+                request.httpShouldHandleCookies = false
+                for (name, value) in HTTPCookie.requestHeaderFields(with: sent) { request.setValue(value, forHTTPHeaderField: name) }
+                let session = probeSessions.session(for: server, fingerprint: trustedFingerprint(for: server))
+                let (data, response) = try await session.data(for: request)
+                guard !Task.isCancelled, id == runID else { return }
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                    throw VideoStreamError.invalidData
+                }
+                cameras = try LiveCamera.decode(data)
+                let saved = defaults.string(forKey: "nativeCamera") ?? selectedCamera
+                selectedCamera = cameras.first(where: { $0.name == saved })?.name ?? cameras.first?.name ?? ""
+                replaceWebView() // Release the login/dashboard page; retain its cookie store only.
+                state = .connected
+                loadStarted = nil
+                detail = ""
+                failures = 0
+                startNativePlayback()
+                return
+            } catch {
+                guard !Task.isCancelled, id == runID else { return }
+                markOffline("Could not load the camera list. Retrying automatically.")
+                failures += 1
+                return
+            }
+        }
         let page = lastPages[server.origin].flatMap { server.isRestorablePage($0) ? $0 : nil } ?? server.url
         navigation = webView.load(URLRequest(url: page, cachePolicy: .reloadIgnoringLocalCacheData,
                                              timeoutInterval: 12))
@@ -267,6 +356,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private func markOffline(_ message: String) {
         rememberCurrentPage()
         state = .reconnecting
+        nativePlayer.stop()
         detail = message
         loadStarted = nil
     }
