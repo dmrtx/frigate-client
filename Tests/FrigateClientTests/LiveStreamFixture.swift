@@ -15,13 +15,15 @@ final class LiveStreamFixture: @unchecked Sendable {
     private var stall = false
     private let closeFirst: Bool
     private let config: String
+    private let skipInitialKeyframe: Bool
     private var selectedStreams: [String] = []
 
-    init(closeFirst: Bool = false, stall: Bool = false, videoData: Data? = nil,
+    init(closeFirst: Bool = false, stall: Bool = false, videoData: Data? = nil, skipInitialKeyframe: Bool = false,
          config: String = #"{"cameras":{"example":{"enabled":true,"live":{"streams":{"Main":"example"}}}}}"#) throws {
         self.closeFirst = closeFirst
         self.stall = stall
         self.config = config
+        self.skipInitialKeyframe = skipInitialKeyframe
         let (initialize, fragments) = try videoData.map { try fragmentedFixture($0) } ?? videoFixture()
         self.initialize = initialize
         var parser = FragmentedVideo()
@@ -71,7 +73,7 @@ final class LiveStreamFixture: @unchecked Sendable {
                 connection.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] error in
                     guard error == nil, let self else { connection.cancel(); return }
                     self.sendFrame(connection, data: self.initialize)
-                    self.sendVideo(connection, index: 0, time: 0, connectionNumber: number)
+                    self.sendVideo(connection, index: self.skipInitialKeyframe ? 1 : 0, time: 0, connectionNumber: number)
                 })
             } else if text.hasPrefix("GET /api/config ") {
                 self.respond(connection, code: 200, body: self.config)

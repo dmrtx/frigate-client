@@ -187,41 +187,6 @@ private struct FrigateWebView: NSViewRepresentable {
     func updateNSView(_ nsView: WKWebView, context: Context) { }
 }
 
-private struct NativeLiveView: View {
-    let connection: ConnectionController
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            NativeVideoSurface(renderer: connection.nativePlayer.renderer)
-            if !connection.nativePlayer.isPlaying && connection.state == .connected {
-                VStack(spacing: 12) {
-                    Text(connection.cameras.isEmpty ? "No enabled cameras were found." : connection.nativePlayer.message)
-                        .foregroundStyle(.white.opacity(0.8))
-                    if connection.nativePlayer.recoveryPaused {
-                        Button("Reconnect") { connection.reconnect() }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            if connection.state == .connected, !connection.cameras.isEmpty {
-                HStack(spacing: 6) {
-                    Picker("Camera", selection: Binding(get: { connection.selectedCamera }, set: { connection.selectCamera($0) })) {
-                        ForEach(connection.cameras) { camera in Text(camera.name).tag(camera.name) }
-                    }
-                    if let camera = connection.activeCamera, camera.streamOptions.count > 1 {
-                        Picker("Stream", selection: Binding(get: { connection.selectedStream }, set: { connection.selectStream($0) })) {
-                            ForEach(camera.streamOptions) { stream in Text(stream.label).tag(stream.name) }
-                        }
-                    }
-                }
-                .labelsHidden()
-                .fixedSize()
-                .padding(8)
-            }
-        }
-        .background(.black)
-    }
-}
-
 private struct ServerSettingsView: View {
     let connection: ConnectionController
     @Environment(\.dismiss) private var dismiss

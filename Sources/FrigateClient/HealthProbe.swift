@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// A lightweight authenticated request renews Frigate's cookie without resuming video playback.
 @MainActor
@@ -36,11 +37,25 @@ final class HealthProbe {
                 : .unavailable("Frigate returned error \(http.statusCode).")
         } catch {
             let error = error as NSError
-            let trustErrors = [NSURLErrorServerCertificateUntrusted, NSURLErrorServerCertificateHasBadDate,
-                               NSURLErrorServerCertificateHasUnknownRoot, NSURLErrorServerCertificateNotYetValid]
-            if error.domain == NSURLErrorDomain && trustErrors.contains(error.code) { return .needsTrust }
+            if Self.needsCertificateApproval(error) { return .needsTrust }
+            if error.domain == NSURLErrorDomain && error.code == NSURLErrorNotConnectedToInternet {
+                return .unavailable("Network access is unavailable. Check your connection and macOS Local Network permission.")
+            }
             return .unavailable("Could not connect to Frigate.")
         }
+    }
+
+    /// Some macOS versions report a rejected certificate as a general TLS error with peer trust.
+    static func needsCertificateApproval(_ error: NSError) -> Bool {
+        guard error.domain == NSURLErrorDomain else { return false }
+        let trustErrors = [NSURLErrorServerCertificateUntrusted, NSURLErrorServerCertificateHasBadDate,
+                           NSURLErrorServerCertificateHasUnknownRoot, NSURLErrorServerCertificateNotYetValid]
+        if trustErrors.contains(error.code) { return true }
+        guard error.code == NSURLErrorSecureConnectionFailed,
+              let peer = error.userInfo[NSURLErrorFailingURLPeerTrustErrorKey],
+              CFGetTypeID(peer as CFTypeRef) == SecTrustGetTypeID() else { return false }
+        let trust = peer as! SecTrust
+        return !SecTrustEvaluateWithError(trust, nil)
     }
 
     /// Prefer an existing signed-in session before falling back to a reachable login page.

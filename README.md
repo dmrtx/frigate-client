@@ -1,6 +1,6 @@
 # Frigate Client
 
-A minimal macOS menu bar client for [Frigate](https://frigate.video/). Native live view displays a selected camera without dashboard JavaScript. The full Frigate dashboard is also available.
+A minimal macOS menu bar client for [Frigate](https://frigate.video/). Native live view displays a camera grid without dashboard JavaScript. The full Frigate dashboard is also available.
 
 ## Install
 
@@ -30,7 +30,7 @@ Frigate usually uses a [self-signed certificate on port 8971](https://docs.friga
 ## Use
 
 - The app stays in the menu bar, without a Dock icon. Choose **Open Frigate** to show the window, or **Hide Frigate** (`⌘H`) to hide it and pause playback.
-- **Native live view** is enabled by default on a fresh installation. An existing explicit mode preference is preserved. Choose a camera in the small picker; when multiple feeds are configured, choose a stream beside it. Stream selections are remembered per camera. Select a lower-bandwidth feed when available to reduce decoding work. This mode is video-only and requires go2rtc with H.264 or H.265. Disable it in the menu bar to open Frigate's full dashboard, events, recordings, and audio controls. A browser view is created only for sign-in, certificate approval, or the dashboard and is released during native playback.
+- **Native live view** is enabled by default on a fresh installation. An existing explicit mode preference is preserved. Start with **All cameras**, or select one camera in the small picker. Each tile has its own stream picker when multiple feeds are configured. Only tiles inside the scroll viewport decode video. Stream selections are remembered per camera. Select a lower-bandwidth feed when available to reduce decoding work. This mode is video-only and requires go2rtc with H.264 or H.265. Disable it in the menu bar to open Frigate's full dashboard, events, recordings, and audio controls. A browser view is created only for sign-in, certificate approval, or the dashboard and is released during native playback.
 - The slim title bar shows a small connection dot at the right: green when connected and signed in, amber while reconnecting or when sign-in is required. Hover for details.
 - Closing, minimizing, or explicitly hiding the app suspends media playback. A visible window keeps playing when another app is in front, including on another display. Reopening, restoring, or unhiding resumes it automatically; a minimized window stays paused when the app is unhidden. Background page reloads do not add extra playback suspensions. If a page loaded while hidden, restoring it reloads that page so blocked autoplay starts again. A pause of at least a minute also reloads the last camera page to recover stale streams. Login and logout pages are never saved as the page to restore.
 - **Reconnect** or `⌘R` immediately retries both addresses. Automatic retries increase from 2 to 30 seconds.
@@ -55,7 +55,7 @@ Your server addresses and certificate approvals are stored in macOS preferences.
 Requires Xcode with Swift 6.2 or later. There are no external package dependencies.
 
 ```sh
-swift test
+swift test --no-parallel
 ./Scripts/package_app.sh
 open FrigateClient.app
 ```

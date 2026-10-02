@@ -24,6 +24,9 @@ func fragmentedFixture(_ data: Data) throws -> (Data, [Data]) {
     return (initialize, fragments)
 }
 
+@Suite(.serialized)
+struct NativeVideoTests {
+
 /// Use a generated test pattern, never private camera footage, for repeatable throughput checks.
 @MainActor @Test(.enabled(if: ProcessInfo.processInfo.environment["FRIGATE_BENCHMARK_MP4"] != nil))
 func syntheticNativePlaybackResourceSample() async throws {
@@ -86,6 +89,8 @@ func syntheticNativePlaybackResourceSample() async throws {
     let controller = ConnectionController(defaults: preferences, websiteDataStore: .nonPersistent())
     #expect(controller.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
     defer { controller.setViewVisible(false) }
+    try await awaitNative { controller.state == .connected }
+    controller.selectCamera("example")
     try await awaitNative { controller.nativePlayer.isPlaying }
     #expect(controller.activeCamera?.streamOptions.count == 2)
     controller.selectStream("not-configured")
@@ -142,6 +147,156 @@ func syntheticNativePlaybackResourceSample() async throws {
     #expect(controller.webView == nil)
 }
 
+@MainActor @Test func threeCameraGridDisplaysAndRecoversEveryVisibleFeed() async throws {
+    guard #available(macOS 14.4, *) else { return }
+    let fixture = try LiveStreamFixture(closeFirst: true, config: #"{"cameras":{"camera1":{},"camera2":{},"camera3":{}}}"#)
+    defer { fixture.stop() }
+    try await awaitNative { fixture.port != nil }
+    let suite = "NativeGridTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let controller = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent())
+    #expect(controller.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
+                          styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = NSHostingView(rootView: ContentView(connection: controller, showingSettings: .constant(false)))
+    window.makeKeyAndOrderFront(nil)
+    defer { controller.setViewVisible(false); window.orderOut(nil) }
+    try await awaitNative {
+        controller.nativeFeeds.count == 3 && controller.nativeFeeds.allSatisfy {
+            $0.player.receivedFrames >= 20 && $0.player.isPlaying && $0.player.renderer.layer.isReadyForDisplay
+        }
+    }
+    #expect(fixture.opened == 4)
+    #expect(Set(fixture.requestedStreams).count == 3)
+    let identities = controller.nativeFeeds.map { ObjectIdentifier($0.player) }
+    controller.reconnectCamera("camera2")
+    try await awaitNative { fixture.opened == 5 && controller.nativeFeeds.allSatisfy { $0.player.isPlaying } }
+    #expect(controller.nativeFeeds.map { ObjectIdentifier($0.player) } == identities)
+    controller.hideWindow()
+    #expect(controller.nativeFeeds.allSatisfy { !$0.player.isPlaying })
+    let counts = controller.nativeFeeds.map { $0.player.receivedFrames }, opened = fixture.opened
+    try await Task.sleep(for: .milliseconds(500))
+    #expect(controller.nativeFeeds.map { $0.player.receivedFrames } == counts)
+    #expect(fixture.opened == opened)
+    window.makeKeyAndOrderFront(nil)
+    try await awaitNative { controller.nativeFeeds.allSatisfy { $0.player.isPlaying && $0.player.receivedFrames >= 5 } }
+    window.miniaturize(nil)
+    try await awaitNative { controller.nativeFeeds.allSatisfy { !$0.player.isPlaying } }
+    window.deminiaturize(nil)
+    try await awaitNative { controller.nativeFeeds.allSatisfy { $0.player.isPlaying } }
+    window.close()
+    try await awaitNative { controller.nativeFeeds.allSatisfy { !$0.player.isPlaying } }
+    #expect(controller.webView == nil)
+}
+
+@MainActor @Test func switchingSingleCamerasReplacesTheDisplayedRenderer() async throws {
+    let fixture = try LiveStreamFixture(config: #"{"cameras":{"camera1":{},"camera2":{}}}"#)
+    defer { fixture.stop() }
+    try await awaitNative { fixture.port != nil }
+    let suite = "NativeCameraSwitchTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let controller = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent())
+    #expect(controller.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480), styleMask: [.titled], backing: .buffered, defer: false)
+    let hosting = NSHostingView(rootView: ContentView(connection: controller, showingSettings: .constant(false)))
+    window.contentView = hosting
+    window.orderFront(nil)
+    defer { controller.setViewVisible(false); window.orderOut(nil) }
+    try await awaitNative { controller.nativeFeeds.count == 2 }
+    func displays(_ renderer: NativeVideoRenderer, in view: NSView) -> Bool {
+        if view is NativeVideoNSView, view.layer?.sublayers?.contains(where: { $0 === renderer.layer }) == true { return true }
+        return view.subviews.contains { displays(renderer, in: $0) }
+    }
+    controller.selectCamera("camera1")
+    let first = controller.nativePlayer.renderer
+    try await awaitNative { controller.nativePlayer.receivedFrames >= 5 && displays(first, in: hosting) }
+    controller.selectCamera("camera2")
+    let second = controller.nativePlayer.renderer
+    try await awaitNative { controller.nativePlayer.receivedFrames >= 5 && displays(second, in: hosting) }
+    #expect(!displays(first, in: hosting))
+}
+
+@MainActor @Test func scrollingTheGridStopsOffscreenDecodersAndStartsNewTiles() async throws {
+    let cameras = Dictionary(uniqueKeysWithValues: (1...9).map { ("camera\($0)", [String: String]()) })
+    let config = String(data: try JSONSerialization.data(withJSONObject: ["cameras": cameras]), encoding: .utf8)!
+    let fixture = try LiveStreamFixture(config: config)
+    defer { fixture.stop() }
+    try await awaitNative { fixture.port != nil }
+    let suite = "NativeViewportTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let controller = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent())
+    #expect(controller.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+    let hosting = NSHostingView(rootView: ContentView(connection: controller, showingSettings: .constant(false)))
+    window.contentView = hosting
+    window.orderFront(nil)
+    defer { controller.setViewVisible(false); window.orderOut(nil) }
+    try await awaitNative { controller.nativeFeeds.count == 9 && controller.nativeFeeds.first?.player.isPlaying == true }
+    print("Grid viewport: initial top tile playing")
+    #expect(controller.nativeFeeds.last?.player.isPlaying == false)
+    func scrollView(in view: NSView) -> NSScrollView? {
+        if let scroll = view as? NSScrollView { return scroll }
+        return view.subviews.lazy.compactMap { scrollView(in: $0) }.first
+    }
+    let scroll = try #require(scrollView(in: hosting))
+    let document = try #require(scroll.documentView)
+    print("Grid viewport sizes: document \(document.bounds.size), clip \(scroll.contentView.bounds.size)")
+    scroll.contentView.scroll(to: NSPoint(x: 0, y: document.bounds.height - scroll.contentView.bounds.height))
+    scroll.reflectScrolledClipView(scroll.contentView)
+    try await awaitNative { controller.nativeFeeds.last?.player.isPlaying == true && controller.nativeFeeds.first?.player.isPlaying == false }
+    print("Grid viewport: bottom tile playing, top stopped")
+    let pausedFrames = controller.nativeFeeds.first!.player.receivedFrames
+    try await Task.sleep(for: .milliseconds(500))
+    #expect(controller.nativeFeeds.first?.player.receivedFrames == pausedFrames)
+    scroll.contentView.scroll(to: .zero)
+    scroll.reflectScrolledClipView(scroll.contentView)
+    try await awaitNative { controller.nativeFeeds.first?.player.isPlaying == true && controller.nativeFeeds.last?.player.isPlaying == false }
+    print("Grid viewport: top tile restored, bottom stopped")
+}
+
+@MainActor @Test(.enabled(if: ProcessInfo.processInfo.environment["FRIGATE_GRID_BENCHMARK_MP4"] != nil))
+func simultaneousNativeGridResourceSample() async throws {
+    guard #available(macOS 14.4, *) else { return }
+    let environment = ProcessInfo.processInfo.environment
+    let count = max(1, min(16, Int(environment["FRIGATE_GRID_BENCHMARK_COUNT"] ?? "3") ?? 3))
+    let cameras = Dictionary(uniqueKeysWithValues: (1...count).map { ("camera\($0)", [String: String]()) })
+    let config = String(data: try JSONSerialization.data(withJSONObject: ["cameras": cameras]), encoding: .utf8)!
+    let fixture = try LiveStreamFixture(videoData: Data(contentsOf: URL(fileURLWithPath: environment["FRIGATE_GRID_BENCHMARK_MP4"]!)), config: config)
+    defer { fixture.stop() }
+    try await awaitNative { fixture.port != nil }
+    let suite = "NativeGridBenchmark.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let controller = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent())
+    #expect(controller.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1600, height: 1100), styleMask: [.titled], backing: .buffered, defer: false)
+    window.contentView = NSHostingView(rootView: ContentView(connection: controller, showingSettings: .constant(false)))
+    window.orderFront(nil)
+    defer { controller.setViewVisible(false); window.orderOut(nil) }
+    try await awaitNative {
+        controller.nativeFeeds.count == count && controller.nativeFeeds.allSatisfy { $0.player.receivedFrames >= 30 && $0.player.renderer.layer.isReadyForDisplay }
+    }
+    let startCPU = cpuSeconds(), start = ProcessInfo.processInfo.systemUptime
+    let before = controller.nativeFeeds.map { $0.player.receivedFrames }
+    try await Task.sleep(for: .seconds(20))
+    let elapsed = ProcessInfo.processInfo.systemUptime - start
+    let frames = zip(controller.nativeFeeds, before).map { $0.0.player.receivedFrames - $0.1 }
+    #expect(frames.allSatisfy { $0 >= 500 })
+    #expect(controller.nativeFeeds.allSatisfy { $0.player.isPlaying })
+    #expect(fixture.opened == count)
+    var usage = rusage()
+    getrusage(RUSAGE_SELF, &usage)
+    print("Native grid sample: \(count) simultaneous 1440p streams; frames per camera \(frames); \(String(format: "%.1f", elapsed)) s; test-process CPU \(String(format: "%.1f", 100 * (cpuSeconds() - startCPU) / elapsed))% of one core; peak RSS \(usage.ru_maxrss / (1024 * 1024)) MiB.")
+    controller.setViewVisible(false)
+    let stoppedCPU = cpuSeconds(), stopped = ProcessInfo.processInfo.systemUptime
+    try await Task.sleep(for: .seconds(5))
+    print("Stopped grid sample: test-process CPU \(String(format: "%.1f", 100 * (cpuSeconds() - stoppedCPU) / (ProcessInfo.processInfo.systemUptime - stopped)))% of one core.")
+}
+
 @MainActor @Test func aWorkspaceWakeRestartsNativePlaybackWithoutAWindowFocusEvent() async throws {
     let fixture = try LiveStreamFixture()
     defer { fixture.stop() }
@@ -164,13 +319,16 @@ func syntheticNativePlaybackResourceSample() async throws {
 func packagedAppSyntheticStreamFixture() async throws {
     let portFile = ProcessInfo.processInfo.environment["FRIGATE_PACKAGE_TEST_PORT_FILE"]!
     let video = ProcessInfo.processInfo.environment["FRIGATE_BENCHMARK_MP4"]!
-    let fixture = try LiveStreamFixture(videoData: Data(contentsOf: URL(fileURLWithPath: video)))
+    let count = max(1, min(16, Int(ProcessInfo.processInfo.environment["FRIGATE_PACKAGE_TEST_CAMERA_COUNT"] ?? "1") ?? 1))
+    let cameras = Dictionary(uniqueKeysWithValues: (1...count).map { ("camera\($0)", [String: String]()) })
+    let config = String(data: try JSONSerialization.data(withJSONObject: ["cameras": cameras]), encoding: .utf8)!
+    let fixture = try LiveStreamFixture(videoData: Data(contentsOf: URL(fileURLWithPath: video)), config: config)
     defer { fixture.stop() }
     try await awaitNative { fixture.port != nil }
     try String(fixture.port!).write(toFile: portFile, atomically: true, encoding: .utf8)
     let seconds = Double(ProcessInfo.processInfo.environment["FRIGATE_PACKAGE_TEST_SECONDS"] ?? "90") ?? 90
     try await Task.sleep(for: .seconds(seconds))
-    #expect(fixture.opened >= 1)
+    #expect(Set(fixture.requestedStreams).count == count)
     print("Packaged acceptance: \(fixture.opened) stream connections.")
 }
 
@@ -228,7 +386,7 @@ func packagedAppSyntheticStreamFixture() async throws {
     var count = 0
     for fragment in fragments {
         for packet in try parser.receive(fragment) {
-            try renderer.enqueue(parser.sampleBuffer(packet))
+            try await renderer.enqueue(parser.sampleBuffer(packet))
             count += 1
             try await Task.sleep(for: .milliseconds(100))
         }
@@ -354,6 +512,23 @@ func privateNativeCameraPlaybackAndResume() async throws {
     try await awaitNative { player.receivedFrames >= 10 && player.renderer.layer.isReadyForDisplay }
 }
 
+@MainActor @Test func joiningBetweenKeyframesDoesNotDisconnectAnOtherwiseHealthyStream() async throws {
+    guard #available(macOS 14.4, *) else { return }
+    let fixture = try LiveStreamFixture(skipInitialKeyframe: true)
+    defer { fixture.stop() }
+    try await awaitNative { fixture.port != nil }
+    let player = NativeLivePlayer(store: WKWebsiteDataStore.nonPersistent().httpCookieStore)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 180), styleMask: [.titled], backing: .buffered, defer: false)
+    window.contentView = NativeVideoNSView(renderer: player.renderer)
+    window.orderFront(nil)
+    defer { player.stop(); window.orderOut(nil) }
+    player.start(server: try ServerAddress("http://127.0.0.1:\(fixture.port!)"), stream: "example", fingerprint: nil)
+    try await awaitNative { player.receivedFrames >= 50 && player.renderer.layer.isReadyForDisplay }
+    #expect(player.isPlaying)
+    #expect(!player.recoveryPaused)
+    #expect(fixture.opened == 1)
+}
+
 @MainActor @Test func aStalledNativeStreamStopsAfterItsRecoveryBudgetIsExhausted() async throws {
     let fixture = try LiveStreamFixture(stall: true)
     defer { fixture.stop() }
@@ -398,4 +573,6 @@ func privateNativeCameraPlaybackAndResume() async throws {
     try await awaitNative({ controller.activeServer == backupAddress && controller.nativePlayer.receivedFrames >= 10 }, seconds: 25)
     #expect(backup.opened >= 1)
     #expect(controller.state == .connected)
+}
+
 }

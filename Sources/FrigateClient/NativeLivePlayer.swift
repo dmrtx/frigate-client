@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import WebKit
 import CoreMedia
+import OSLog
 
 struct LiveStream: Identifiable, Equatable, Sendable {
     let name: String
@@ -34,10 +35,15 @@ struct LiveCamera: Identifiable, Equatable {
 /// Each stream attempt owns its parser. Samples are newly allocated and transferred to the UI actor.
 actor NativeStreamDecoder {
     private var parser = FragmentedVideo()
+    private var waitingForKeyframe = true
     func receive(_ data: Data) throws -> sending [CMSampleBuffer] {
         try Task.checkCancellation()
         var samples: [CMSampleBuffer] = []
         for packet in try parser.receive(data) {
+            if waitingForKeyframe {
+                guard packet.sync else { continue }
+                waitingForKeyframe = false
+            }
             samples.append(try parser.sampleBuffer(packet))
         }
         return samples
@@ -64,6 +70,7 @@ struct StreamTiming {
 
 @MainActor @Observable
 final class NativeLivePlayer {
+    @ObservationIgnored private let logger = Logger(subsystem: "app.frigateclient.desktop", category: "NativePlayback")
     let renderer = NativeVideoRenderer()
     private(set) var message = "Choose a camera."
     private(set) var isPlaying = false
@@ -71,6 +78,8 @@ final class NativeLivePlayer {
     @ObservationIgnored private(set) var receivedFrames = 0
     @ObservationIgnored private(set) var lastFailureCode = ""
     @ObservationIgnored private(set) var lastHandshakeStatus = 0
+    @ObservationIgnored private var videoMessages = 0
+    @ObservationIgnored private var videoBytes = 0
     @ObservationIgnored private var runner: Task<Void, Never>?
     @ObservationIgnored private var watchdog: Task<Void, Never>?
     @ObservationIgnored private var socket: URLSessionWebSocketTask?
@@ -130,6 +139,7 @@ final class NativeLivePlayer {
                 let failure = error as NSError
                 lastFailureCode = "\(failure.domain):\(failure.code)"
                 lastHandshakeStatus = (socket?.response as? HTTPURLResponse)?.statusCode ?? 0
+                logger.error("Playback attempt failed: \(self.lastFailureCode, privacy: .public); HTTP \(self.lastHandshakeStatus); accepted frames \(self.receivedFrames); video messages \(self.videoMessages); video bytes \(self.videoBytes); timed out \(self.timedOut)")
                 message = timedOut ? VideoStreamError.stalled.localizedDescription :
                     (error as? VideoStreamError)?.localizedDescription ?? "Could not connect to the camera."
             }
@@ -170,6 +180,8 @@ final class NativeLivePlayer {
         socket.maximumMessageSize = FragmentedVideo.maximumMessageSize
         self.socket = socket
         let decoder = NativeStreamDecoder()
+        videoMessages = 0
+        videoBytes = 0
         timedOut = false
         lastFrame = nil
         let started = ProcessInfo.processInfo.systemUptime
@@ -182,6 +194,7 @@ final class NativeLivePlayer {
                 if elapsed > (self.lastFrame == nil ? self.timing.startup : self.timing.stalled) {
                     self.timedOut = true
                     socket?.cancel(with: .goingAway, reason: nil)
+                    self.renderer.clear()
                     return
                 }
             }
@@ -202,10 +215,14 @@ final class NativeLivePlayer {
                     throw reason.contains("codecs") ? VideoStreamError.unsupportedCodec : VideoStreamError.cameraUnavailable
                 }
             case .data(let data):
+                videoMessages += 1
+                videoBytes += data.count
                 let samples = try await decoder.receive(data)
                 guard !Task.isCancelled, id == generation else { return }
                 for sample in samples {
-                    try renderer.enqueue(sample)
+                    try await renderer.enqueue(sample)
+                    guard !Task.isCancelled, id == generation else { return }
+                    if timedOut { throw VideoStreamError.stalled }
                     receivedFrames += 1
                     lastFrame = ProcessInfo.processInfo.systemUptime
                     if !isPlaying { isPlaying = true; self.message = "" }

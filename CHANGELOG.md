@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0 — native camera grid
+
+- Show all cameras in an adaptive native grid, with independent stream selection and reconnection.
+- Stop decoding offscreen tiles and restart them as they scroll into view.
+- Wait for decoder capacity and an initial keyframe; continue through recoverable damaged frames.
+- Report macOS local-network failures clearly and recognize untrusted certificates reported as general TLS errors.
+- Add hosted three-camera recovery, nine-camera scrolling, camera switching, and missing-keyframe regression tests.
+- Verify a locally installed app through Computer Use and measure simultaneous synthetic streams.
+
+This remains a prerelease. Real-camera testing found intermittent upstream streams; all-camera and all-day reliability are not yet established.
+
 ## 0.3.0 — native playback by default
 
 - Use native live view by default on fresh installations, preserving explicit existing mode preferences.

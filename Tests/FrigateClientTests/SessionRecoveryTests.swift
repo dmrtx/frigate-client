@@ -1,7 +1,27 @@
 import Foundation
 import Testing
 import WebKit
+import Security
 @testable import FrigateClient
+
+@MainActor @Test func aGeneralTLSErrorWithUntrustedPeerTrustReachesCertificateApproval() throws {
+    let url = try #require(Bundle.module.url(forResource: "test-certificate", withExtension: "der", subdirectory: "Resources"))
+    let certificate = try #require(SecCertificateCreateWithData(nil, Data(contentsOf: url) as CFData))
+    var trust: SecTrust?
+    #expect(SecTrustCreateWithCertificates(certificate, SecPolicyCreateSSL(true, "frigate.example" as CFString), &trust) == errSecSuccess)
+    let peer = try #require(trust)
+    let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorSecureConnectionFailed,
+                        userInfo: [NSURLErrorFailingURLPeerTrustErrorKey: peer])
+    #expect(HealthProbe.needsCertificateApproval(error))
+    #expect(!ServerTrust.accepts(peer, fingerprint: nil)) // Classifying an error does not approve the certificate.
+}
+
+@MainActor @Test func otherTLSFailuresAndConnectionErrorsDoNotBecomeCertificateApprovals() {
+    #expect(!HealthProbe.needsCertificateApproval(NSError(domain: NSURLErrorDomain, code: NSURLErrorSecureConnectionFailed)))
+    #expect(!HealthProbe.needsCertificateApproval(NSError(domain: NSURLErrorDomain, code: NSURLErrorSecureConnectionFailed,
+                                                        userInfo: [NSURLErrorFailingURLPeerTrustErrorKey: "invalid"])))
+    #expect(!HealthProbe.needsCertificateApproval(NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet)))
+}
 
 private func cookie(_ value: String = "old", domain: String = "refresh.example", path: String = "/",
                     secure: Bool = true, expires: Date = .now.addingTimeInterval(3600)) -> HTTPCookie {

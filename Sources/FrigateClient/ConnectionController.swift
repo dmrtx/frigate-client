@@ -31,7 +31,15 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var cameras: [LiveCamera] = []
     private(set) var selectedCamera = ""
     private(set) var selectedStream = ""
-    let nativePlayer: NativeLivePlayer
+    private(set) var nativeFeeds: [NativeCameraFeed] = []
+    private(set) var showsAllCameras: Bool
+    private var visibleCameraIDs: Set<String> = []
+    @ObservationIgnored private var emptyPlayer: NativeLivePlayer?
+    var nativePlayer: NativeLivePlayer {
+        if let feed = activeFeed { return feed.player }
+        if emptyPlayer == nil { emptyPlayer = NativeLivePlayer(store: websiteDataStore.httpCookieStore) }
+        return emptyPlayer!
+    }
     @ObservationIgnored private(set) weak var window: NSWindow?
     @ObservationIgnored private var windowVisibility: NSKeyValueObservation?
     @ObservationIgnored private var appVisibility: AnyCancellable?
@@ -69,7 +77,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         self.defaults = defaults
         self.websiteDataStore = websiteDataStore
         nativeEnabled = defaults.object(forKey: "nativeLiveEnabled") as? Bool ?? true
-        nativePlayer = NativeLivePlayer(store: websiteDataStore.httpCookieStore)
+        showsAllCameras = defaults.object(forKey: "nativeShowAllCameras") as? Bool ?? true
         primary = defaults.string(forKey: "primaryURL") ?? Self.defaultPrimary
         backup = defaults.string(forKey: "backupURL") ?? Self.defaultBackup
         healthProbe = HealthProbe(cookies: WebSessionCookies(store: websiteDataStore.httpCookieStore))
@@ -138,7 +146,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         servers = settings
         if resetPageRecovery { pageRecoveryBudget.reset() }
         pageRecoveryPaused = false
-        nativePlayer.stop()
+        stopNativePlayback()
         pageWatchdog.reset()
         probeSessions.retainServers(settings.candidates)
         monitor?.cancel()
@@ -169,7 +177,10 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func selectCamera(_ name: String) {
-        guard let camera = cameras.first(where: { $0.name == name }), selectedCamera != name else { return }
+        guard let camera = cameras.first(where: { $0.name == name }), selectedCamera != name || showsAllCameras else { return }
+        stopNativePlayback()
+        showsAllCameras = false
+        defaults.set(false, forKey: "nativeShowAllCameras")
         selectedCamera = name
         defaults.set(name, forKey: "nativeCamera")
         selectedStream = preferredStream(for: camera)
@@ -177,14 +188,45 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     var activeCamera: LiveCamera? { cameras.first { $0.name == selectedCamera } }
+    var activeFeed: NativeCameraFeed? { nativeFeeds.first { $0.id == selectedCamera } }
+
+    func showAllCameras() {
+        guard !showsAllCameras else { return }
+        stopNativePlayback()
+        showsAllCameras = true
+        defaults.set(true, forKey: "nativeShowAllCameras")
+        startNativePlayback()
+    }
+
+    func setCameraVisible(_ name: String, _ visible: Bool) {
+        guard let feed = nativeFeeds.first(where: { $0.id == name }) else { return }
+        if visible {
+            guard visibleCameraIDs.insert(name).inserted else { return }
+            if showsAllCameras { start(feed) }
+        } else {
+            guard visibleCameraIDs.remove(name) != nil else { return }
+            if showsAllCameras && nativeFeeds.count > 1 { feed.player.stop() }
+        }
+    }
+
+    func reconnectCamera(_ name: String) {
+        guard let feed = nativeFeeds.first(where: { $0.id == name }) else { return }
+        start(feed)
+    }
 
     func selectStream(_ name: String) {
-        guard let camera = activeCamera, camera.streams.contains(name), selectedStream != name else { return }
-        selectedStream = name
+        selectStream(name, for: selectedCamera)
+    }
+
+    func selectStream(_ name: String, for cameraName: String) {
+        guard let feed = nativeFeeds.first(where: { $0.id == cameraName }),
+              feed.camera.streams.contains(name), feed.stream != name else { return }
+        feed.stream = name
+        if cameraName == selectedCamera { selectedStream = name }
         var saved = defaults.dictionary(forKey: "nativeStreamSelections") as? [String: String] ?? [:]
-        saved[camera.name] = name
+        saved[cameraName] = name
         defaults.set(saved, forKey: "nativeStreamSelections")
-        startNativePlayback()
+        if !showsAllCameras || visibleCameraIDs.contains(cameraName) || nativeFeeds.count == 1 { start(feed) }
     }
 
     private func preferredStream(for camera: LiveCamera) -> String {
@@ -193,9 +235,40 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     private func startNativePlayback() {
-        guard nativeEnabled, !requiresSignIn, viewIsVisible, let activeServer,
-              activeCamera?.streams.contains(selectedStream) == true else { return }
-        nativePlayer.start(server: activeServer, stream: selectedStream, fingerprint: trustedFingerprint(for: activeServer))
+        for feed in playbackFeeds { start(feed) }
+    }
+
+    private var playbackFeeds: [NativeCameraFeed] {
+        if !showsAllCameras { return activeFeed.map { [$0] } ?? [] }
+        if nativeFeeds.count == 1 { return nativeFeeds }
+        return nativeFeeds.filter { visibleCameraIDs.contains($0.id) }
+    }
+
+    private func start(_ feed: NativeCameraFeed) {
+        guard nativeEnabled, state == .connected, !requiresSignIn, viewIsVisible, let activeServer,
+              feed.camera.streams.contains(feed.stream),
+              showsAllCameras || selectedCamera == feed.id else { return }
+        feed.player.start(server: activeServer, stream: feed.stream, fingerprint: trustedFingerprint(for: activeServer))
+    }
+
+    private func stopNativePlayback() {
+        for feed in nativeFeeds { feed.player.stop() }
+        emptyPlayer?.stop()
+    }
+
+    private func updateNativeFeeds() {
+        let previous = Dictionary(uniqueKeysWithValues: nativeFeeds.map { ($0.id, $0) })
+        let names = Set(cameras.map(\.name))
+        for feed in nativeFeeds where !names.contains(feed.id) { feed.player.stop() }
+        visibleCameraIDs.formIntersection(names)
+        nativeFeeds = cameras.map { camera in
+            let stream = preferredStream(for: camera)
+            if let feed = previous[camera.name] {
+                feed.update(camera: camera, stream: stream)
+                return feed
+            }
+            return NativeCameraFeed(camera: camera, stream: stream, store: websiteDataStore.httpCookieStore)
+        }
     }
 
     func hideWindow() {
@@ -229,7 +302,14 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         case .connected:
             if pageRecoveryPaused { return "Page recovery paused" }
             if requiresSignIn { return "Sign in required · \(routeName)" }
-            if nativeEnabled { return nativePlayer.isPlaying ? "Live · \(routeName)" : nativePlayer.message }
+            if nativeEnabled {
+                if !viewIsVisible { return "Paused · \(routeName)" }
+                if showsAllCameras && nativeFeeds.count > 1 {
+                    let playing = playbackFeeds.filter { $0.player.isPlaying }.count
+                    return "Live · \(playing)/\(playbackFeeds.count) cameras · \(routeName)"
+                }
+                return nativePlayer.isPlaying ? "Live · \(routeName)" : nativePlayer.message
+            }
             return "Connected · \(routeName)"
         case .reconnecting: return "Reconnecting"
         case .idle: return "Not configured"
@@ -238,7 +318,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     var indicatorState: ConnectionState {
-        pageRecoveryPaused || (state == .connected && nativeEnabled && !requiresSignIn && !nativePlayer.isPlaying) ? .reconnecting : state
+        pageRecoveryPaused || (state == .connected && nativeEnabled && !requiresSignIn &&
+                               playbackFeeds.contains { !$0.player.isPlaying }) ? .reconnecting : state
     }
 
     func recoverIfNeeded() {
@@ -282,7 +363,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         pageWatchdog.reset()
         if nativeEnabled && !requiresSignIn {
             if visible { startNativePlayback(); recoverIfNeeded() }
-            else { nativePlayer.stop() }
+            else { stopNativePlayback() }
             hiddenSince = visible ? nil : .now
             return
         }
@@ -382,6 +463,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
                 cameras = try LiveCamera.decode(data)
                 let saved = defaults.string(forKey: "nativeCamera") ?? selectedCamera
                 selectedCamera = cameras.first(where: { $0.name == saved })?.name ?? cameras.first?.name ?? ""
+                updateNativeFeeds()
                 selectedStream = activeCamera.map(preferredStream(for:)) ?? ""
                 releaseBrowser() // Keep only the cookie store after sign-in.
                 state = .connected
@@ -411,7 +493,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private func markOffline(_ message: String) {
         rememberCurrentPage()
         state = .reconnecting
-        nativePlayer.stop()
+        stopNativePlayback()
         releaseBrowser()
         detail = message
         loadStarted = nil
