@@ -36,6 +36,7 @@ Requires Xcode with Swift 6.2 or later. There are no external package dependenci
 ```sh
 swift test --no-parallel
 ./Scripts/package_app.sh
+./Scripts/verify_package.sh
 open FrigateClient.app
 ```
 
