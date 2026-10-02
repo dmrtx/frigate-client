@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Observation
 import WebKit
+import Combine
 
 enum ConnectionState: Equatable {
     case idle, connecting, connected, reconnecting
@@ -29,19 +30,23 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var nativeEnabled: Bool
     private(set) var cameras: [LiveCamera] = []
     private(set) var selectedCamera = ""
+    private(set) var selectedStream = ""
     let nativePlayer: NativeLivePlayer
-    @ObservationIgnored weak var window: NSWindow?
-    private(set) var webView: WKWebView
+    @ObservationIgnored private(set) weak var window: NSWindow?
+    @ObservationIgnored private var windowVisibility: NSKeyValueObservation?
+    @ObservationIgnored private var appVisibility: AnyCancellable?
+    @ObservationIgnored private var wakeEvents: AnyCancellable?
+    private(set) var webView: WKWebView?
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let probeSessions = ProbeSessionPool()
     @ObservationIgnored private let healthProbe: HealthProbe
     @ObservationIgnored private let websiteDataStore: WKWebsiteDataStore
-    @ObservationIgnored private var mediaPlayback: MediaPlayback
+    @ObservationIgnored private var mediaPlayback: MediaPlayback?
     @ObservationIgnored private var pageMonitor: Task<Void, Never>?
     @ObservationIgnored private var pageRecoveryBudget = StreamRetryBudget()
     @ObservationIgnored private lazy var pageWatchdog = PageWatchdog(probe: { [weak self] reply in
-        self?.webView.evaluateJavaScript("1", in: nil, in: .defaultClient) { result in
+        self?.webView?.evaluateJavaScript("1", in: nil, in: .defaultClient) { result in
             if case .success(let value) = result { reply((value as? Int) == 1) }
             else { reply(false) }
         }
@@ -59,21 +64,29 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     @ObservationIgnored private var hiddenSince: Date?
     @ObservationIgnored private var pageLoadedWhileHidden = false
 
-    init(defaults: UserDefaults = .standard, websiteDataStore: WKWebsiteDataStore = .default()) {
+    init(defaults: UserDefaults = .standard, websiteDataStore: WKWebsiteDataStore = .default(),
+         wakeNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter) {
         self.defaults = defaults
         self.websiteDataStore = websiteDataStore
-        nativeEnabled = defaults.object(forKey: "nativeLiveEnabled") as? Bool ?? false
+        nativeEnabled = defaults.object(forKey: "nativeLiveEnabled") as? Bool ?? true
         nativePlayer = NativeLivePlayer(store: websiteDataStore.httpCookieStore)
         primary = defaults.string(forKey: "primaryURL") ?? Self.defaultPrimary
         backup = defaults.string(forKey: "backupURL") ?? Self.defaultBackup
-        let view = Self.makeWebView(dataStore: websiteDataStore)
-        webView = view
-        mediaPlayback = MediaPlayback { suspended, completion in
-            view.setAllMediaPlaybackSuspended(suspended, completionHandler: completion)
-        }
-        healthProbe = HealthProbe(cookies: WebSessionCookies(store: view.configuration.websiteDataStore.httpCookieStore))
+        healthProbe = HealthProbe(cookies: WebSessionCookies(store: websiteDataStore.httpCookieStore))
         super.init()
-        configureWebView()
+        appVisibility = Publishers.Merge(
+            NotificationCenter.default.publisher(for: NSApplication.didHideNotification),
+            NotificationCenter.default.publisher(for: NSApplication.didUnhideNotification)
+        ).receive(on: DispatchQueue.main).sink { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshWindowVisibility() }
+        }
+        wakeEvents = wakeNotificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.state != .idle else { return }
+                    self.reconnect()
+                }
+            }
         pageMonitor = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(10)) } catch { return }
@@ -96,13 +109,19 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         return WKWebView(frame: .zero, configuration: configuration)
     }
 
-    private func configureWebView() {
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
-        webView.allowsBackForwardNavigationGestures = true
+    private func makeBrowser() -> WKWebView {
+        let view = Self.makeWebView(dataStore: websiteDataStore)
+        webView = view
+        mediaPlayback = MediaPlayback { suspended, completion in
+            view.setAllMediaPlaybackSuspended(suspended, completionHandler: completion)
+        }
+        view.navigationDelegate = self
+        view.uiDelegate = self
+        view.allowsBackForwardNavigationGestures = true
         #if DEBUG
-        webView.isInspectable = true
+        view.isInspectable = true
         #endif
+        return view
     }
 
     @discardableResult
@@ -126,7 +145,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         runID = UUID()
         resolveCertificate(accept: false)
         rejectedServers.removeAll()
-        webView.stopLoading()
+        webView?.stopLoading()
         navigation = nil
         activeServer = nil
         state = .connecting
@@ -145,27 +164,60 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         guard nativeEnabled != enabled else { return }
         nativeEnabled = enabled
         defaults.set(enabled, forKey: "nativeLiveEnabled")
-        replaceWebView()
+        releaseBrowser()
         if state != .idle { reconnect() }
     }
 
     func selectCamera(_ name: String) {
-        guard cameras.contains(where: { $0.name == name }) else { return }
+        guard let camera = cameras.first(where: { $0.name == name }), selectedCamera != name else { return }
         selectedCamera = name
         defaults.set(name, forKey: "nativeCamera")
+        selectedStream = preferredStream(for: camera)
         startNativePlayback()
+    }
+
+    var activeCamera: LiveCamera? { cameras.first { $0.name == selectedCamera } }
+
+    func selectStream(_ name: String) {
+        guard let camera = activeCamera, camera.streams.contains(name), selectedStream != name else { return }
+        selectedStream = name
+        var saved = defaults.dictionary(forKey: "nativeStreamSelections") as? [String: String] ?? [:]
+        saved[camera.name] = name
+        defaults.set(saved, forKey: "nativeStreamSelections")
+        startNativePlayback()
+    }
+
+    private func preferredStream(for camera: LiveCamera) -> String {
+        let saved = (defaults.dictionary(forKey: "nativeStreamSelections") as? [String: String])?[camera.name]
+        return saved.flatMap { camera.streams.contains($0) ? $0 : nil } ?? camera.streams.first ?? ""
     }
 
     private func startNativePlayback() {
         guard nativeEnabled, !requiresSignIn, viewIsVisible, let activeServer,
-              let camera = cameras.first(where: { $0.name == selectedCamera }), let stream = camera.streams.first else { return }
-        nativePlayer.start(server: activeServer, stream: stream, fingerprint: trustedFingerprint(for: activeServer))
+              activeCamera?.streams.contains(selectedStream) == true else { return }
+        nativePlayer.start(server: activeServer, stream: selectedStream, fingerprint: trustedFingerprint(for: activeServer))
     }
 
     func hideWindow() {
         guard let window else { return }
         setViewVisible(false)
         window.orderOut(nil)
+    }
+
+    func attachWindow(_ newWindow: NSWindow?) {
+        guard window !== newWindow else { return }
+        windowVisibility?.invalidate()
+        window = newWindow
+        windowVisibility = newWindow?.observe(\.isVisible, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in self?.refreshWindowVisibility() }
+        }
+        refreshWindowVisibility()
+    }
+
+    func refreshWindowVisibility() {
+        guard let window else { setViewVisible(false); return }
+        setViewVisible(WindowPlaybackVisibility.isVisible(
+            windowIsVisible: window.isVisible, isMiniaturized: window.isMiniaturized, appIsHidden: NSApp.isHidden))
     }
 
     var routeName: String {
@@ -194,7 +246,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func checkPageResponsiveness() {
-        guard !pageRecoveryPaused, (!nativeEnabled || requiresSignIn), viewIsVisible, state == .connected, certificate == nil, !webView.isLoading else {
+        guard !pageRecoveryPaused, (!nativeEnabled || requiresSignIn), viewIsVisible, state == .connected, certificate == nil,
+              let webView, !webView.isLoading else {
             pageWatchdog.reset()
             return
         }
@@ -206,7 +259,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         guard !pageRecoveryPaused, viewIsVisible, state == .connected, certificate == nil else { return }
         rememberCurrentPage()
         pageWatchdog.reset()
-        replaceWebView()
+        releaseBrowser()
         guard pageRecoveryBudget.retry() != nil else {
             pageRecoveryPaused = true
             detail = "Page recovery paused after repeated stalls. Choose Reconnect to try again."
@@ -215,16 +268,12 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         _ = connect(resetPageRecovery: false)
     }
 
-    private func replaceWebView() {
-        webView.navigationDelegate = nil
-        webView.uiDelegate = nil
-        webView.stopLoading()
-        webView = Self.makeWebView(dataStore: websiteDataStore)
-        let view = webView
-        mediaPlayback = MediaPlayback { suspended, completion in
-            view.setAllMediaPlaybackSuspended(suspended, completionHandler: completion)
-        }
-        configureWebView()
+    private func releaseBrowser() {
+        webView?.navigationDelegate = nil
+        webView?.uiDelegate = nil
+        webView?.stopLoading()
+        webView = nil
+        mediaPlayback = nil
     }
 
     func setViewVisible(_ visible: Bool) {
@@ -240,6 +289,10 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let reload = visible && ViewRecoveryPolicy.needsReload(
             hiddenSince: hiddenSince, pageLoadedWhileHidden: pageLoadedWhileHidden)
         hiddenSince = visible ? nil : .now
+        guard let mediaPlayback else {
+            if visible { recoverIfNeeded() }
+            return
+        }
         mediaPlayback.update(isVisible: visible) { [weak self] in
             guard visible, let self, self.viewIsVisible else { return }
             if reload && self.state != .idle && self.certificate == nil { self.reconnect() }
@@ -277,7 +330,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
                     } else if authenticated && requiresSignIn {
                         requiresSignIn = false
                         if nativeEnabled { reconnect() }
-                        else if let url = webView.url, !activeServer.isRestorablePage(url) { reconnect() }
+                        else if let url = webView?.url, !activeServer.isRestorablePage(url) { reconnect() }
                     }
                 }
             case .reconnecting:
@@ -285,7 +338,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
                 await attemptConnection(id: id)
             case .connecting:
                 if certificate == nil, let loadStarted, Date().timeIntervalSince(loadStarted) > 20 {
-                    webView.stopLoading()
+                    webView?.stopLoading()
                     navigation = nil
                     markOffline("Frigate took too long to respond.")
                 }
@@ -329,7 +382,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
                 cameras = try LiveCamera.decode(data)
                 let saved = defaults.string(forKey: "nativeCamera") ?? selectedCamera
                 selectedCamera = cameras.first(where: { $0.name == saved })?.name ?? cameras.first?.name ?? ""
-                replaceWebView() // Release the login/dashboard page; retain its cookie store only.
+                selectedStream = activeCamera.map(preferredStream(for:)) ?? ""
+                releaseBrowser() // Keep only the cookie store after sign-in.
                 state = .connected
                 loadStarted = nil
                 detail = ""
@@ -344,7 +398,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
             }
         }
         let page = lastPages[server.origin].flatMap { server.isRestorablePage($0) ? $0 : nil } ?? server.url
-        navigation = webView.load(URLRequest(url: page, cachePolicy: .reloadIgnoringLocalCacheData,
+        let view = webView ?? makeBrowser()
+        navigation = view.load(URLRequest(url: page, cachePolicy: .reloadIgnoringLocalCacheData,
                                              timeoutInterval: 12))
     }
 
@@ -357,12 +412,13 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         rememberCurrentPage()
         state = .reconnecting
         nativePlayer.stop()
+        releaseBrowser()
         detail = message
         loadStarted = nil
     }
 
     private func rememberCurrentPage() {
-        if let server = activeServer, let url = webView.url, server.isRestorablePage(url) {
+        if let server = activeServer, let url = webView?.url, server.isRestorablePage(url) {
             lastPages[server.origin] = url
         }
     }
@@ -396,9 +452,9 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard navigation === self.navigation, let server = activeServer else { return }
+        guard webView === self.webView, navigation === self.navigation, let server = activeServer else { return }
         if let url = webView.url, server.isRestorablePage(url) { lastPages[server.origin] = url }
-        mediaPlayback.update(isVisible: viewIsVisible)
+        mediaPlayback?.update(isVisible: viewIsVisible)
         state = .connected
         detail = ""
         failures = 0

@@ -1,10 +1,18 @@
 import Foundation
 import Observation
 import WebKit
+import CoreMedia
+
+struct LiveStream: Identifiable, Equatable, Sendable {
+    let name: String
+    let label: String
+    var id: String { name }
+}
 
 struct LiveCamera: Identifiable, Equatable {
     let name: String
-    let streams: [String]
+    let streamOptions: [LiveStream]
+    var streams: [String] { streamOptions.map(\.name) }
     var id: String { name }
 
     static func decode(_ data: Data) throws -> [LiveCamera] {
@@ -14,9 +22,25 @@ struct LiveCamera: Identifiable, Equatable {
             guard camera["enabled"] as? Bool != false else { return nil }
             let live = camera["live"] as? [String: Any]
             let streams = live?["streams"] as? [String: String]
-            let configured = streams?.sorted(by: { $0.key < $1.key }).map(\.value).filter { !$0.isEmpty } ?? []
-            return LiveCamera(name: name, streams: configured.isEmpty ? [name] : configured)
+            var seen: Set<String> = []
+            let configured = streams?.sorted(by: { $0.key < $1.key }).compactMap { label, value in
+                !value.isEmpty && seen.insert(value).inserted ? LiveStream(name: value, label: label) : nil
+            } ?? []
+            return LiveCamera(name: name, streamOptions: configured.isEmpty ? [LiveStream(name: name, label: "Default")] : configured)
         }.sorted { $0.name < $1.name }
+    }
+}
+
+/// Each stream attempt owns its parser. Samples are newly allocated and transferred to the UI actor.
+actor NativeStreamDecoder {
+    private var parser = FragmentedVideo()
+    func receive(_ data: Data) throws -> sending [CMSampleBuffer] {
+        try Task.checkCancellation()
+        var samples: [CMSampleBuffer] = []
+        for packet in try parser.receive(data) {
+            samples.append(try parser.sampleBuffer(packet))
+        }
+        return samples
     }
 }
 
@@ -44,9 +68,9 @@ final class NativeLivePlayer {
     private(set) var message = "Choose a camera."
     private(set) var isPlaying = false
     private(set) var recoveryPaused = false
-    private(set) var receivedFrames = 0
-    private(set) var lastFailureCode = ""
-    private(set) var lastHandshakeStatus = 0
+    @ObservationIgnored private(set) var receivedFrames = 0
+    @ObservationIgnored private(set) var lastFailureCode = ""
+    @ObservationIgnored private(set) var lastHandshakeStatus = 0
     @ObservationIgnored private var runner: Task<Void, Never>?
     @ObservationIgnored private var watchdog: Task<Void, Never>?
     @ObservationIgnored private var socket: URLSessionWebSocketTask?
@@ -145,7 +169,7 @@ final class NativeLivePlayer {
         let socket = session.webSocketTask(with: request)
         socket.maximumMessageSize = FragmentedVideo.maximumMessageSize
         self.socket = socket
-        var demuxer = FragmentedVideo()
+        let decoder = NativeStreamDecoder()
         timedOut = false
         lastFrame = nil
         let started = ProcessInfo.processInfo.systemUptime
@@ -178,8 +202,10 @@ final class NativeLivePlayer {
                     throw reason.contains("codecs") ? VideoStreamError.unsupportedCodec : VideoStreamError.cameraUnavailable
                 }
             case .data(let data):
-                for packet in try demuxer.receive(data) {
-                    try renderer.enqueue(demuxer.sampleBuffer(packet))
+                let samples = try await decoder.receive(data)
+                guard !Task.isCancelled, id == generation else { return }
+                for sample in samples {
+                    try renderer.enqueue(sample)
                     receivedFrames += 1
                     lastFrame = ProcessInfo.processInfo.systemUptime
                     if !isPlaying { isPlaying = true; self.message = "" }

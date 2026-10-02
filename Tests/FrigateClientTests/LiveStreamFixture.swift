@@ -14,10 +14,14 @@ final class LiveStreamFixture: @unchecked Sendable {
     private var available = true
     private var stall = false
     private let closeFirst: Bool
+    private let config: String
+    private var selectedStreams: [String] = []
 
-    init(closeFirst: Bool = false, stall: Bool = false, videoData: Data? = nil) throws {
+    init(closeFirst: Bool = false, stall: Bool = false, videoData: Data? = nil,
+         config: String = #"{"cameras":{"example":{"enabled":true,"live":{"streams":{"Main":"example"}}}}}"#) throws {
         self.closeFirst = closeFirst
         self.stall = stall
+        self.config = config
         let (initialize, fragments) = try videoData.map { try fragmentedFixture($0) } ?? videoFixture()
         self.initialize = initialize
         var parser = FragmentedVideo()
@@ -41,6 +45,7 @@ final class LiveStreamFixture: @unchecked Sendable {
         return port
     }
     var opened: Int { queue.sync { streamsOpened } }
+    var requestedStreams: [String] { queue.sync { selectedStreams } }
     func setUnavailable() { queue.sync { available = false; connections.forEach { $0.cancel() } } }
     func stop() { queue.sync { connections.forEach { $0.cancel() }; connections.removeAll(); listener.cancel() } }
 
@@ -53,6 +58,10 @@ final class LiveStreamFixture: @unchecked Sendable {
             }
             guard self.available else { self.respond(connection, code: 503, body: "Unavailable"); return }
             if text.contains("Upgrade: websocket") || text.lowercased().contains("upgrade: websocket") {
+                let path = text.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+                if let src = URLComponents(string: "http://fixture" + path)?.queryItems?.first(where: { $0.name == "src" })?.value {
+                    self.selectedStreams.append(src)
+                }
                 let key = text.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("sec-websocket-key:") }?
                     .split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces) ?? ""
                 let accept = Data(Insecure.SHA1.hash(data: Data((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8))).base64EncodedString()
@@ -65,7 +74,7 @@ final class LiveStreamFixture: @unchecked Sendable {
                     self.sendVideo(connection, index: 0, time: 0, connectionNumber: number)
                 })
             } else if text.hasPrefix("GET /api/config ") {
-                self.respond(connection, code: 200, body: #"{"cameras":{"example":{"enabled":true,"live":{"streams":{"Main":"example"}}}}}"#)
+                self.respond(connection, code: 200, body: self.config)
             } else { self.respond(connection, code: 200, body: "test-version") }
         }
     }

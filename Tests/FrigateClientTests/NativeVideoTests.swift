@@ -4,6 +4,8 @@ import Testing
 import WebKit
 import AppKit
 import Darwin
+import SwiftUI
+import CoreVideo
 @testable import FrigateClient
 
 func videoFixture(_ name: String = "video-h264") throws -> (Data, [Data]) {
@@ -45,14 +47,16 @@ func syntheticNativePlaybackResourceSample() async throws {
     #expect(frames >= 500)
     #expect(player.isPlaying)
     #expect(fixture.opened == 1)
+    let displayed = try #require(player.renderer.layer.sampleBufferRenderer.displayedPixelBuffer())
+    print("Native displayed pixel buffer: \(CVPixelBufferGetWidth(displayed)) × \(CVPixelBufferGetHeight(displayed)).")
     var usage = rusage()
     getrusage(RUSAGE_SELF, &usage)
-    print("Synthetic native sample: \(frames) frames in \(String(format: "%.1f", elapsed)) s; app-process CPU \(String(format: "%.1f", cpu))% of one core; test-process peak RSS \(usage.ru_maxrss / (1024 * 1024)) MiB.")
+    print("Synthetic native sample: \(frames) frames in \(String(format: "%.1f", elapsed)) s; test-process CPU \(String(format: "%.1f", cpu))% of one core; test-process peak RSS \(usage.ru_maxrss / (1024 * 1024)) MiB.")
     player.stop()
     let stoppedFrames = player.receivedFrames, stoppedCPU = cpuSeconds(), stopped = ProcessInfo.processInfo.systemUptime
     try await Task.sleep(for: .seconds(5))
     #expect(player.receivedFrames == stoppedFrames)
-    print("Stopped native sample: app-process CPU \(String(format: "%.1f", 100 * (cpuSeconds() - stoppedCPU) / (ProcessInfo.processInfo.systemUptime - stopped)))% of one core.")
+    print("Stopped native sample: test-process CPU \(String(format: "%.1f", 100 * (cpuSeconds() - stoppedCPU) / (ProcessInfo.processInfo.systemUptime - stopped)))% of one core.")
 }
 
 @Test func nativeStreamURLsPreserveSubpathsAndEncodeCameraNames() throws {
@@ -68,7 +72,106 @@ func syntheticNativePlaybackResourceSample() async throws {
     let cameras = try LiveCamera.decode(data)
     #expect(cameras.map(\.name) == ["example", "fallback"])
     #expect(cameras[0].streams == ["stream_main"])
+    #expect(cameras[0].streamOptions[0].label == "Main")
     #expect(cameras[1].streams == ["fallback"])
+}
+
+@MainActor @Test func streamSelectionIsValidatedAndRememberedForEachCamera() async throws {
+    let fixture = try LiveStreamFixture(config: #"{"cameras":{"example":{"live":{"streams":{"High":"main","Low":"sub","Duplicate":"sub"}}},"other":{}}}"#)
+    defer { fixture.stop() }
+    try await awaitNative { fixture.port != nil }
+    let suite = "StreamSelectionTests.\(UUID().uuidString)"
+    let preferences = UserDefaults(suiteName: suite)!
+    defer { preferences.removePersistentDomain(forName: suite) }
+    let controller = ConnectionController(defaults: preferences, websiteDataStore: .nonPersistent())
+    #expect(controller.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
+    defer { controller.setViewVisible(false) }
+    try await awaitNative { controller.nativePlayer.isPlaying }
+    #expect(controller.activeCamera?.streamOptions.count == 2)
+    controller.selectStream("not-configured")
+    #expect(controller.selectedStream != "not-configured")
+    controller.selectStream("main")
+    try await awaitNative { fixture.requestedStreams.last == "main" && controller.nativePlayer.isPlaying }
+    controller.selectStream("sub")
+    try await awaitNative { fixture.requestedStreams.last == "sub" && controller.nativePlayer.isPlaying }
+    controller.selectCamera("other")
+    try await awaitNative { fixture.requestedStreams.last == "other" && controller.nativePlayer.isPlaying }
+    controller.selectCamera("example")
+    try await awaitNative { fixture.requestedStreams.last == "sub" && controller.nativePlayer.isPlaying }
+    controller.reconnect()
+    try await awaitNative { controller.state == .connected && controller.nativePlayer.isPlaying }
+    #expect(controller.selectedStream == "sub")
+    #expect(controller.webView == nil)
+}
+
+@MainActor @Test func nativeWindowNotificationsPauseAndResumeTheHostedInterface() async throws {
+    let fixture = try LiveStreamFixture()
+    defer { fixture.stop() }
+    try await awaitNative { fixture.port != nil }
+    let suite = "NativeWindowTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let controller = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent())
+    #expect(controller.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+                          styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = NSHostingView(rootView: ContentView(connection: controller, showingSettings: .constant(false)))
+    window.makeKeyAndOrderFront(nil)
+    defer { controller.setViewVisible(false); window.orderOut(nil) }
+    try await awaitNative { controller.window === window && controller.nativePlayer.receivedFrames >= 10 }
+    print("Native window: initial playback ready")
+    window.miniaturize(nil)
+    try await awaitNative { !controller.nativePlayer.isPlaying }
+    print("Native window: minimized playback stopped")
+    let frames = controller.nativePlayer.receivedFrames
+    try await Task.sleep(for: .milliseconds(500))
+    #expect(controller.nativePlayer.receivedFrames == frames)
+    window.deminiaturize(nil)
+    try await awaitNative { controller.nativePlayer.isPlaying }
+    print("Native window: restored playback ready")
+    controller.hideWindow()
+    #expect(!controller.nativePlayer.isPlaying)
+    #expect(!window.isVisible)
+    window.makeKeyAndOrderFront(nil)
+    try await awaitNative { controller.nativePlayer.isPlaying }
+    print("Native window: shown playback ready")
+    window.close()
+    try await awaitNative { !controller.nativePlayer.isPlaying }
+    print("Native window: closed playback stopped")
+    #expect(controller.webView == nil)
+}
+
+@MainActor @Test func aWorkspaceWakeRestartsNativePlaybackWithoutAWindowFocusEvent() async throws {
+    let fixture = try LiveStreamFixture()
+    defer { fixture.stop() }
+    try await awaitNative { fixture.port != nil }
+    let suite = "NativeWakeTests.\(UUID().uuidString)", wakeCenter = NotificationCenter()
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let controller = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent(), wakeNotificationCenter: wakeCenter)
+    #expect(controller.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
+    defer { controller.setViewVisible(false) }
+    try await awaitNative { controller.nativePlayer.isPlaying }
+    let opened = fixture.opened
+    wakeCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+    try await awaitNative { fixture.opened > opened && controller.nativePlayer.isPlaying }
+    #expect(controller.webView == nil)
+}
+
+/// Holds a synthetic server open for an external, separately packaged acceptance app.
+@MainActor @Test(.enabled(if: ProcessInfo.processInfo.environment["FRIGATE_PACKAGE_TEST_PORT_FILE"] != nil && ProcessInfo.processInfo.environment["FRIGATE_BENCHMARK_MP4"] != nil))
+func packagedAppSyntheticStreamFixture() async throws {
+    let portFile = ProcessInfo.processInfo.environment["FRIGATE_PACKAGE_TEST_PORT_FILE"]!
+    let video = ProcessInfo.processInfo.environment["FRIGATE_BENCHMARK_MP4"]!
+    let fixture = try LiveStreamFixture(videoData: Data(contentsOf: URL(fileURLWithPath: video)))
+    defer { fixture.stop() }
+    try await awaitNative { fixture.port != nil }
+    try String(fixture.port!).write(toFile: portFile, atomically: true, encoding: .utf8)
+    let seconds = Double(ProcessInfo.processInfo.environment["FRIGATE_PACKAGE_TEST_SECONDS"] ?? "90") ?? 90
+    try await Task.sleep(for: .seconds(seconds))
+    #expect(fixture.opened >= 1)
+    print("Packaged acceptance: \(fixture.opened) stream connections.")
 }
 
 @Test func repeatedStreamFailuresStopAutomaticRecoveryInsteadOfSpinning() {
@@ -132,6 +235,9 @@ func syntheticNativePlaybackResourceSample() async throws {
     }
     #expect(count == 20)
     try await awaitNative { renderer.layer.isReadyForDisplay }
+    let displayed = try #require(renderer.layer.sampleBufferRenderer.displayedPixelBuffer())
+    #expect(CVPixelBufferGetWidth(displayed) == 160)
+    #expect(CVPixelBufferGetHeight(displayed) == 90)
 }
 
 @MainActor @Test func stoppingNativePlaybackReleasesItsConnectionAndResetsState() {
@@ -213,7 +319,7 @@ func privateNativeCameraPlaybackAndResume() async throws {
     let cpu = 100 * (cpuSeconds() - startCPU) / (ProcessInfo.processInfo.systemUptime - start)
     #expect(player.isPlaying)
     #expect(player.receivedFrames > framesBefore)
-    print("Native video acceptance: \(player.receivedFrames - framesBefore) frames; app-process CPU \(String(format: "%.1f", cpu))% of one core over 30 seconds.")
+    print("Native video acceptance: \(player.receivedFrames - framesBefore) frames; test-process CPU \(String(format: "%.1f", cpu))% of one core over 30 seconds.")
     player.stop()
     let stoppedAt = player.receivedFrames
     try await Task.sleep(for: .seconds(2))
@@ -280,7 +386,7 @@ func privateNativeCameraPlaybackAndResume() async throws {
     defer { controller.setViewVisible(false) }
     try await awaitNative { controller.state == .connected && controller.nativePlayer.receivedFrames >= 10 }
     #expect(controller.nativeEnabled)
-    #expect(controller.webView.url == nil) // Dashboard JavaScript is absent during native playback.
+    #expect(controller.webView == nil) // No browser view exists during native playback.
     controller.setViewVisible(false)
     let paused = controller.nativePlayer.receivedFrames, opened = primary.opened
     try await Task.sleep(for: .seconds(1))

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 — native playback by default
+
+- Use native live view by default on fresh installations, preserving explicit existing mode preferences.
+- Create a browser view only for login or the full dashboard; release it during native playback and when a server goes offline.
+- Parse video fragments and prepare compressed samples in a separate actor, transferring ownership safely to the UI renderer.
+- Keep per-frame diagnostics out of UI observation.
+- Add labeled stream selection and remember each camera's chosen feed, allowing lower-bandwidth streams when configured.
+- Observe actual window visibility so reopening a hidden window resumes playback even without a focus event.
+- Listen for Mac wake events on the correct workspace notification center.
+- Test the hosted SwiftUI window's minimize, restore, hide, show, and close behavior, along with stream selection and wake recovery.
+
+Native mode displays one video-only camera. Disable **Native live view** in the menu bar for Frigate's full dashboard. Releases remain prereleases while live-server stability and runtime behavior on older macOS versions, Intel, and other Macs are not fully verified.
+
 ## 0.2.0 — native live-view preview
 
 - Add optional video-only native playback for a selected camera, using Frigate's authenticated MSE stream and Apple's video renderer.

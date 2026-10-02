@@ -52,7 +52,7 @@ extension Data {
     }
 }
 
-struct VideoPacket {
+struct VideoPacket: Sendable {
     let bytes: Data
     let decodeTime: Int64
     let presentationTime: Int64
@@ -201,7 +201,7 @@ struct FragmentedVideo {
         return result
     }
 
-    func sampleBuffer(_ packet: VideoPacket) throws -> CMSampleBuffer {
+    func sampleBuffer(_ packet: VideoPacket) throws -> sending CMSampleBuffer {
         guard let format, timescale > 0, !packet.bytes.isEmpty else { throw VideoStreamError.invalidData }
         var block: CMBlockBuffer?
         guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil,

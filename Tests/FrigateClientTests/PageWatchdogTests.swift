@@ -123,21 +123,22 @@ private func stallPage(_ view: WKWebView) {
     connection.setNativeEnabled(false)
     #expect(connection.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
     try await eventually { connection.state == .connected }
-    let oldView = connection.webView // SwiftUI can retain the old view until its next update.
+    let oldView = try #require(connection.webView) // SwiftUI can retain the old view until its next update.
     let original = ObjectIdentifier(oldView)
     // Keep the page's JS thread busy while native watchdog deadlines continue firing.
     stallPage(oldView)
     connection.checkPageResponsiveness()
     try await Task.sleep(for: .milliseconds(5500))
     connection.checkPageResponsiveness()
-    try await eventually { ObjectIdentifier(connection.webView) != original && connection.state == .connected }
-    #expect(connection.webView.configuration.websiteDataStore === store)
+    try await eventually { connection.webView.map { ObjectIdentifier($0) != original } == true && connection.state == .connected }
+    let newView = try #require(connection.webView)
+    #expect(newView.configuration.websiteDataStore === store)
     let cookies = await store.httpCookieStore.allCookies()
     #expect(cookies.contains { $0.name == "fixture-session" && $0.value == "preserved" })
     #expect(fixture.receivedSession)
-    let result = try await connection.webView.evaluateJavaScript("document.querySelector('button').click(); document.querySelector('button').textContent")
+    let result = try await newView.evaluateJavaScript("document.querySelector('button').click(); document.querySelector('button').textContent")
     #expect(result as? String == "Responsive")
-    #expect(oldView !== connection.webView)
+    #expect(oldView !== newView)
     connection.setViewVisible(false)
 }
 
@@ -149,6 +150,7 @@ private func stallPage(_ view: WKWebView) {
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
     let connection = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent())
+    connection.setNativeEnabled(false)
     #expect(connection.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
     defer { connection.setViewVisible(false) }
     try await eventually { connection.state == .connected }
@@ -159,12 +161,12 @@ private func stallPage(_ view: WKWebView) {
     }
     connection.restoreUnresponsivePage()
     #expect(connection.pageRecoveryPaused)
-    #expect(connection.webView.url == nil)
+    #expect(connection.webView == nil)
     #expect(connection.indicatorState == .reconnecting)
     connection.checkPageResponsiveness()
     try await Task.sleep(for: .milliseconds(200))
     #expect(connection.pageRecoveryPaused)
     connection.reconnect()
-    try await eventually { connection.state == .connected && connection.webView.url != nil }
+    try await eventually { connection.state == .connected && connection.webView?.url != nil }
     #expect(!connection.pageRecoveryPaused)
 }

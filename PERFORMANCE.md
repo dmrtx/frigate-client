@@ -6,7 +6,7 @@ For this macOS-only app, keep Swift and use Apple's native video renderer for li
 
 | Route | Video path | Assessment |
 |---|---|---|
-| Swift with native rendering | Authenticated go2rtc MSE WebSocket → bounded fragmented-MP4 parser → Apple sample-buffer renderer | Implemented as an optional preview; no external runtime dependencies or transcoding. |
+| Swift with native rendering | Authenticated go2rtc MSE WebSocket → bounded fragmented-MP4 parser → Apple sample-buffer renderer | Default on fresh installations; no external runtime dependencies or transcoding. |
 | Rust with native rendering | Network/parser code → a bridge to Apple's media APIs | Viable, but not benchmarked. It would still rely on the same platform decoder; a language rewrite has no demonstrated benefit for this workload. |
 | Rust with Tauri | macOS WKWebView | Tauri alone retains the browser playback path. |
 | Native AVPlayer with HLS | HLS playlist → Apple player | Simpler playback integration if the server already exposes authenticated HLS. This app uses Frigate's existing authenticated MSE endpoint instead. |
@@ -16,11 +16,13 @@ For this macOS-only app, keep Swift and use Apple's native video renderer for li
 
 ## Scope
 
-The preview displays one selected camera, without audio. It uses the first configured `live.streams` value, ordered by its label, or the camera name when that mapping is absent. Cameras need an available go2rtc H.264 or H.265 stream. The full Frigate dashboard remains available by disabling **Native live view (preview)**.
+Native mode displays one selected camera, without audio. The stream picker lists configured `live.streams` labels and remembers a choice for each camera. With no saved choice, it uses the first stream ordered by label, or the camera name when that mapping is absent. Duplicate stream values appear once. The app does not infer which feed has the lowest bitrate; choose a lower-bandwidth stream when one is configured. Cameras need an available go2rtc H.264 or H.265 stream. The full Frigate dashboard remains available by disabling **Native live view**. Existing explicit mode preferences are preserved.
 
-Native playback uses the existing authenticated `/live/mse/api/ws` endpoint, matching session cookies and certificate approval. It does not expose go2rtc's management port or require server changes. A single WebSocket receive loop feeds compressed samples to the renderer; the app has no growing frame queue. Input messages and copied sample payloads are limited to 8 MiB, with at most 4,096 samples per message. Renderer backpressure fails the attempt instead of buffering indefinitely.
+Native playback uses the existing authenticated `/live/mse/api/ws` endpoint, matching session cookies and certificate approval. It does not expose go2rtc's management port or require server changes. A browser view is created only for sign-in or the full dashboard, and released during native playback. The persistent website data store retains the session cookies.
 
-Startup has a 30-second grace period for the first frame. Once receiving video, ten seconds without another frame triggers reconnection. Three automatic retries are allowed in five minutes; another failure pauses playback. Hiding, closing, or minimizing releases the stream and flushes the renderer. Restoring starts a fresh connection. Visible background windows continue playing.
+A single WebSocket receive loop transfers fragments to a separate actor for parsing and compressed-sample preparation. The UI actor only enqueues the prepared samples for native rendering. Per-frame counters are excluded from UI observation. The app has no growing frame queue. Input messages and copied sample payloads are limited to 8 MiB, with at most 4,096 samples per message. Renderer backpressure fails the attempt instead of buffering indefinitely.
+
+Startup has a 30-second grace period for the first frame. Once receiving video, ten seconds without another frame triggers reconnection. Three automatic retries are allowed in five minutes; another failure pauses playback. Hiding, closing, or minimizing releases the stream and flushes the decoder state; the last displayed image can remain allocated. Restoring starts a fresh connection. Actual window visibility is observed, so recovery does not require a focus event. Wake events are received from the workspace notification center. Visible background windows continue playing.
 
 ## Resource sample
 
@@ -28,20 +30,24 @@ A synthetic H.264 test pattern at **2560 × 1440, 30 fps** was streamed over a l
 
 | Measurement | Result |
 |---|---|
-| Samples accepted by the native renderer | 571, about 28.6 fps |
-| Test-process CPU | 4.9% of one CPU core |
+| Samples accepted by the native renderer | 570, about 28.5 fps |
+| Test-process CPU | 4.8% of one CPU core |
 | Test-process peak resident memory | 108 MiB |
 | Test-process CPU after stopping, over five seconds | 0.3% of one CPU core |
 
-CPU was measured from process user/system CPU time divided by elapsed monotonic time. The test process includes the local stream fixture, Swift Testing, and the cookie store. These figures exclude decoder helper processes, WindowServer, GPU activity, and energy usage. They are not whole-system resource totals or a comparison with Rust, Tauri, or the previous dashboard. Peak memory is for the test process, not the packaged app. Accepted samples and a ready display layer establish playback, not an independent frame-by-frame display count.
+CPU was measured from process user/system CPU time divided by elapsed monotonic time. The test process includes the local stream fixture, Swift Testing, and the cookie store. The renderer also returned a decoded 2560 × 1440 pixel buffer. Accepted samples and a ready display layer do not constitute an independent frame-by-frame display count.
+
+The separately packaged universal release app was also launched with an isolated settings domain and the same synthetic stream. A 20-second sample measured **3.5% of one CPU core**, **104 MiB resident memory**, and **29 MiB physical footprint** for the app process. The fixture observed one stream connection. These memory values are endpoint samples, not peak measurements. Process CPU was read with `proc_pid_rusage`, converting its Mach time units with `mach_timebase_info`; a busy-process calibration measured approximately one full CPU core. Apple's [task accounting implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task.c) supplies Mach time counters to [resource usage accounting](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/bsd_kern.c).
+
+All figures exclude decoder helper processes, WindowServer, GPU activity, and energy usage. They are not whole-system resource totals or a comparison with Rust, Tauri, or the previous dashboard. Moving parsing off the UI actor is intended to improve responsiveness; these small CPU samples do not establish a throughput improvement over the previous native preview.
 
 ## Verification and limits
 
-Controlled tests exercise H.264 and H.265 decoding, disconnect/reconnect, stopping and restarting playback, hidden-window shutdown, primary-server failure and backup selection, malformed/truncated/oversized fragments, and the retry limit after repeated stalls. Existing cookie-renewal, certificate/origin isolation, visibility, and real WebKit blocked-JavaScript recovery tests also run. Repeated browser-page recovery now unloads the page after its budget is exhausted.
+The regular suite passes **36 tests**, with three environment-dependent diagnostics skipped. Controlled tests exercise H.264 and H.265 decoding, decoded pixel-buffer dimensions, disconnect/reconnect, stopping and restarting playback, hidden-window shutdown, primary-server failure and backup selection, malformed/truncated/oversized fragments, and the retry limit after repeated stalls. A hosted SwiftUI window is minimized, restored, hidden, shown, and closed through actual AppKit calls. Separate tests check remembered stream choices and simulated workspace wake recovery. Existing cookie-renewal, certificate/origin isolation, visibility, and real WebKit blocked-JavaScript recovery tests also run. Repeated browser-page recovery unloads the page after its budget is exhausted.
 
-One authenticated live-camera attempt displayed video successfully. Subsequent live startup/resume acceptance attempts failed while waiting for frames. A separate raw WebSocket check received the initialization segment but no video fragments for over a minute after a successful handshake, independently of the native decoder. Live-server stability therefore remains unverified; native mode is opt-in and published as a preview.
+Authenticated live-camera playback succeeded initially, including another 30-second playback sample in this version. The restart acceptance check then timed out. A separate raw WebSocket check received the initialization segment but no video fragments for about 70 seconds after a successful handshake, independently of the native decoder. Live-server recovery therefore remains unverified. Native playback cannot display frames that the server does not send. Version 0.3.0 remains a prerelease despite enabling native mode on fresh installations.
 
-No all-day soak test, runtime test on Intel, or acceptance test on the Mac that originally froze has been completed. A blocked native app main thread cannot be repaired by an in-process watchdog. Lower-bandwidth camera substreams and shorter keyframe intervals can also reduce decode work and startup delay; [Frigate's live-view documentation](https://docs.frigate.video/configuration/live/) explains those settings.
+No all-day soak test, runtime test on Intel, or acceptance test on the Mac that originally froze has been completed. The packaged-window screenshot check was blocked by macOS Screen Recording permission; it does not count as visual acceptance. A blocked native app main thread cannot be repaired by an in-process watchdog. Lower-bandwidth camera substreams and shorter keyframe intervals can also reduce decode work and startup delay; [Frigate's live-view documentation](https://docs.frigate.video/configuration/live/) explains those settings.
 
 ## Reproduce the synthetic resource sample
 

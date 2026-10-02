@@ -68,7 +68,7 @@ private struct FrigateMenu: View {
         .keyboardShortcut(",", modifiers: .command)
         Button("Reconnect") { connection.reconnect() }
             .disabled(connection.primary.isEmpty)
-        Toggle("Native live view (preview)", isOn: Binding(get: { connection.nativeEnabled },
+        Toggle("Native live view", isOn: Binding(get: { connection.nativeEnabled },
             set: { connection.setNativeEnabled($0) }))
         Divider()
         Button("Quit Frigate") { NSApp.terminate(nil) }
@@ -89,9 +89,9 @@ struct ContentView: View {
         ZStack {
             if connection.nativeEnabled && !connection.requiresSignIn {
                 NativeLiveView(connection: connection)
-            } else {
-                FrigateWebView(webView: connection.webView)
-                    .id(ObjectIdentifier(connection.webView))
+            } else if let webView = connection.webView {
+                FrigateWebView(webView: webView)
+                    .id(ObjectIdentifier(webView))
                     .opacity(connection.state == .connected ? 1 : 0.15)
             }
             if connection.state != .connected || connection.pageRecoveryPaused {
@@ -128,7 +128,7 @@ struct ContentView: View {
         .background {
             WindowStatusIndicator(state: connection.indicatorState, detail: connection.state == .connected
                                   ? connection.statusText : connection.detail, requiresSignIn: connection.requiresSignIn,
-                                  onWindowChanged: { connection.window = $0 })
+                                  onWindowChanged: { connection.attachWindow($0) })
                 .frame(width: 0, height: 0)
         }
         .sheet(isPresented: $showingSettings) { ServerSettingsView(connection: connection) }
@@ -163,15 +163,6 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)) {
             updateWindowVisibility($0, visible: true)
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didHideNotification)) { _ in
-            connection.setViewVisible(false)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didUnhideNotification)) { _ in
-            refreshWindowVisibility()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSWorkspace.didWakeNotification)) { _ in
-            connection.reconnect()
-        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshWindowVisibility()
             connection.recoverIfNeeded()
@@ -186,9 +177,7 @@ struct ContentView: View {
     }
 
     private func refreshWindowVisibility() {
-        guard let window = connection.window else { return }
-        connection.setViewVisible(WindowPlaybackVisibility.isVisible(
-            windowIsVisible: window.isVisible, isMiniaturized: window.isMiniaturized, appIsHidden: NSApp.isHidden))
+        connection.refreshWindowVisibility()
     }
 }
 
@@ -214,8 +203,15 @@ private struct NativeLiveView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if connection.state == .connected, !connection.cameras.isEmpty {
-                Picker("Camera", selection: Binding(get: { connection.selectedCamera }, set: { connection.selectCamera($0) })) {
-                    ForEach(connection.cameras) { camera in Text(camera.name).tag(camera.name) }
+                HStack(spacing: 6) {
+                    Picker("Camera", selection: Binding(get: { connection.selectedCamera }, set: { connection.selectCamera($0) })) {
+                        ForEach(connection.cameras) { camera in Text(camera.name).tag(camera.name) }
+                    }
+                    if let camera = connection.activeCamera, camera.streamOptions.count > 1 {
+                        Picker("Stream", selection: Binding(get: { connection.selectedStream }, set: { connection.selectStream($0) })) {
+                            ForEach(camera.streamOptions) { stream in Text(stream.label).tag(stream.name) }
+                        }
+                    }
                 }
                 .labelsHidden()
                 .fixedSize()
