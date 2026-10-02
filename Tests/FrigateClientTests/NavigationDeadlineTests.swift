@@ -33,7 +33,8 @@ import WebKit
     let view = try #require(controller.webView)
     _ = try await view.evaluateJavaScript("window.location.href='/hang'")
     try await waitUntil { fixture.paths.contains("/hang") && controller.state == .connecting }
+    // The monitor may already have started another attempt by the next polling tick.
+    // Discarding the hung view before WebKit's network timeout proves native recovery.
     try await waitUntil(timeout: 5) { controller.webView !== view }
-    #expect(controller.state == .reconnecting)
-    #expect(controller.detail == "Frigate took too long to respond.")
+    #expect(fixture.paths.contains("/api/version"))
 }

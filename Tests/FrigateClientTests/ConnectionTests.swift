@@ -62,6 +62,8 @@ func invalidAddressesAreRejected(_ value: String) {
     let remote = try ServerAddress("https://backup.example:8971")
     let first = pool.session(for: local, fingerprint: "first-certificate")
     #expect(pool.session(for: local, fingerprint: "first-certificate") === first)
+    let alternatePath = try ServerAddress("https://frigate.example:8971/backup/")
+    #expect(pool.session(for: alternatePath, fingerprint: "first-certificate") === first)
     let backup = pool.session(for: remote, fingerprint: "first-certificate")
     #expect(backup !== first)
 

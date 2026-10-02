@@ -33,7 +33,10 @@ final class HTTPFixture: @unchecked Sendable {
         listener.start(queue: queue)
     }
 
-    var port: UInt16? { listener.port?.rawValue }
+    var port: UInt16? {
+        guard let port = listener.port?.rawValue, port > 0 else { return nil }
+        return port
+    }
     var paths: [String] { queue.sync { requests } }
     var receivedRequests: [String] { queue.sync { requestTexts } }
     func stop() { queue.sync { listener.cancel(); connections.forEach { $0.cancel() } } }

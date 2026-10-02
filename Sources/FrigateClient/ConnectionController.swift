@@ -57,7 +57,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     @ObservationIgnored private var runID = UUID()
     @ObservationIgnored private var navigation: WKNavigation?
     @ObservationIgnored private var failures = 0
-    @ObservationIgnored private var lastPages: [String: URL] = [:]
+    @ObservationIgnored private var lastPages: [URL: URL] = [:]
     @ObservationIgnored private var rejectedServers: Set<String> = []
     @ObservationIgnored private var pageFailures = PageFailurePolicy()
     @ObservationIgnored private var finishTrust: ((Bool) -> Void)?
@@ -320,7 +320,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         state = .connecting
         detail = server == servers.primary ? "Connecting over the local network…" : "Connecting over Tailscale…"
         nextRetry = nil
-        let page = lastPages[server.origin].flatMap { server.isRestorablePage($0) ? $0 : nil } ?? server.url
+        let page = lastPages[server.url].flatMap { server.isRestorablePage($0) ? $0 : nil } ?? server.url
         let view = webView ?? makeBrowser()
         navigation = view.load(URLRequest(url: page, cachePolicy: .reloadIgnoringLocalCacheData,
                                              timeoutInterval: 12))
@@ -352,7 +352,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     private func rememberCurrentPage() {
         if let server = activeServer, let url = webView?.url, server.isRestorablePage(url) {
-            lastPages[server.origin] = url
+            lastPages[server.url] = url
         }
     }
 
@@ -388,7 +388,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard webView === self.webView, navigation === self.navigation, let server = activeServer else { return }
-        if let url = webView.url, server.isRestorablePage(url) { lastPages[server.origin] = url }
+        if let url = webView.url, server.isRestorablePage(url) { lastPages[server.url] = url }
         mediaPlayback?.update(isVisible: viewIsVisible)
         pageFailures.succeeded(server)
         state = .connected
