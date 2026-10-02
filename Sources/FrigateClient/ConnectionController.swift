@@ -53,6 +53,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     @ObservationIgnored private var failures = 0
     @ObservationIgnored private var lastPages: [String: URL] = [:]
     @ObservationIgnored private var rejectedServers: Set<String> = []
+    @ObservationIgnored private var pageFailures = PageFailurePolicy()
     @ObservationIgnored private var finishTrust: ((Bool) -> Void)?
     @ObservationIgnored private var loadStarted: Date?
     @ObservationIgnored private var viewIsVisible = true
@@ -128,6 +129,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         rememberCurrentPage()
         defaults.set(self.primary, forKey: "primaryURL")
         defaults.set(self.backup, forKey: "backupURL")
+        if servers != settings { pageFailures = PageFailurePolicy() }
         servers = settings
         if resetPageRecovery { pageRecoveryBudget.reset() }
         pageRecoveryPaused = false
@@ -286,7 +288,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
                 if certificate == nil, let loadStarted, Date().timeIntervalSince(loadStarted) > 20 {
                     webView?.stopLoading()
                     navigation = nil
-                    markOffline("Frigate took too long to respond.")
+                    markOffline("Frigate took too long to respond.", pageFailed: true)
                 }
             case .idle: break
             }
@@ -296,7 +298,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private func attemptConnection(id: UUID) async {
         guard let servers else { return }
         let selection = await healthProbe.selectServer(
-            from: servers.candidates.filter { !rejectedServers.contains($0.origin) },
+            from: pageFailures.candidates(from: servers.candidates.filter { !rejectedServers.contains($0.origin) }),
             session: { probeSessions.session(for: $0, fingerprint: trustedFingerprint(for: $0)) })
         guard !Task.isCancelled, id == runID else { return }
         guard let server = selection.server else {
@@ -321,7 +323,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         return await healthProbe.check(server, session: session)
     }
 
-    private func markOffline(_ message: String) {
+    private func markOffline(_ message: String, pageFailed: Bool = false) {
+        if pageFailed, let activeServer { pageFailures.failed(activeServer) }
         rememberCurrentPage()
         state = .reconnecting
         releaseBrowser()
@@ -367,6 +370,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         guard webView === self.webView, navigation === self.navigation, let server = activeServer else { return }
         if let url = webView.url, server.isRestorablePage(url) { lastPages[server.origin] = url }
         mediaPlayback?.update(isVisible: viewIsVisible)
+        pageFailures.succeeded(server)
         state = .connected
         detail = ""
         failures = 0
@@ -381,17 +385,19 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        guard webView === self.webView else { return }
         navigationFailed(navigation, error: error)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        guard webView === self.webView else { return }
         navigationFailed(navigation, error: error)
     }
 
     private func navigationFailed(_ navigation: WKNavigation?, error: Error) {
         guard navigation === self.navigation,
               (error as NSError).code != NSURLErrorCancelled else { return }
-        markOffline("Could not load Frigate. Retrying automatically.")
+        markOffline("Could not load Frigate. Retrying automatically.", pageFailed: true)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -418,7 +424,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
         if response.isForMainFrame, let http = response.response as? HTTPURLResponse,
            http.statusCode >= 500 {
-            markOffline("Frigate returned error \(http.statusCode).")
+            markOffline("Frigate returned error \(http.statusCode).", pageFailed: true)
             decisionHandler(.cancel)
         } else { decisionHandler(.allow) }
     }
