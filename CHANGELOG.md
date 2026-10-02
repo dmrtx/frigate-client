@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1 — dashboard recovery and downloads
+
+- Try the backup when the primary dashboard fails to load, even if its API remains reachable.
+- Recover stalled internal navigations with a native loading deadline while allowing time for certificate review.
+- Allow configured HTTP servers to work consistently in native connection checks and the web dashboard.
+- Save dashboard downloads, attachments, and blob exports through a native dialog; queue simultaneous exports and preserve existing files on failure.
+- Suspend media before loading a new hidden browser, including automatic recovery and Mac wake reloads.
+- Configure microphone permission for two-way talk on compatible cameras, prompting only for the configured server origin.
+
+Validated with 40 automated tests, real WebKit and synthetic loopback fixtures, and signed universal package checks. Microphone approval/denial and two-way talk with a real camera remain unverified. Runtime on Intel and older macOS versions was not exercised.
+
 ## 0.5.0 — full web dashboard
 
 - Replace native camera playback with Frigate's full web interface for every installation.
