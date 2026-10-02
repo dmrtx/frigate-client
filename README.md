@@ -15,6 +15,7 @@ Both addresses remain editable through **Server addresses…** in the menu bar. 
 ## Behavior
 
 - Frigate's web dashboard handles camera layout, stream selection, and playback. The app has no separate native camera player or camera-count limit.
+- Dashboard downloads, attachments, and blob exports use a native Save dialog. Completion and errors appear in the app; canceling a save keeps the dashboard connected.
 - The app stays in the menu bar and has no Dock icon. **Open Frigate** shows its window; **Quit Frigate** exits completely.
 - The slim title bar has a connection indicator on the right. The inactive floating dashboard fullscreen control is hidden; use the green macOS window button for fullscreen.
 - Playback pauses when the window is hidden, closed, or minimized. Visible windows keep playing behind other apps and on other displays.

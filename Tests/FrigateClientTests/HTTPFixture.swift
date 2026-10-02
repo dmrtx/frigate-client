@@ -10,11 +10,13 @@ final class HTTPFixture: @unchecked Sendable {
         var body = Data("<html><body>Fixture</body></html>".utf8)
         var hang = false
         var abort = false
+        var reportedLength: Int?
     }
     private let listener: NWListener
     private let queue = DispatchQueue(label: "HTTPFixture")
     private let response: @Sendable (String) -> Response
     private var requests: [String] = []
+    private var requestTexts: [String] = []
     private var connections: [NWConnection] = []
 
     init(response: @escaping @Sendable (String) -> Response = { _ in Response() }) throws {
@@ -33,6 +35,7 @@ final class HTTPFixture: @unchecked Sendable {
 
     var port: UInt16? { listener.port?.rawValue }
     var paths: [String] { queue.sync { requests } }
+    var receivedRequests: [String] { queue.sync { requestTexts } }
     func stop() { queue.sync { listener.cancel(); connections.forEach { $0.cancel() } } }
 
     private func receive(_ connection: NWConnection, buffered: Data) {
@@ -45,11 +48,12 @@ final class HTTPFixture: @unchecked Sendable {
             }
             let path = String(text.split(separator: " ").dropFirst().first ?? "/")
             self.requests.append(path)
+            self.requestTexts.append(text)
             let result = self.response(path)
             if result.abort { connection.cancel(); return }
             if result.hang { return }
             var headers = result.headers
-            headers["Content-Length"] = String(result.body.count)
+            headers["Content-Length"] = String(result.reportedLength ?? result.body.count)
             headers["Connection"] = "close"
             let header = "HTTP/1.1 \(result.status) Fixture\r\n" + headers.map { "\($0): \($1)\r\n" }.joined() + "\r\n"
             connection.send(content: Data(header.utf8) + result.body,

@@ -137,6 +137,14 @@ struct ContentView: View {
         } message: { certificate in
             Text("\(certificate.server.url.absoluteString) uses a certificate that macOS does not recognize. Frigate usually generates its own certificate. Only this exact certificate will be remembered for this address.\n\nSHA-256: \(certificate.fingerprint)")
         }
+        .alert(connection.downloadNotice?.title ?? "Download", isPresented: Binding(
+            get: { connection.downloadNotice != nil },
+            set: { if !$0 { connection.dismissDownloadNotice() } }
+        )) {
+            Button("OK") { connection.dismissDownloadNotice() }
+        } message: {
+            Text(connection.downloadNotice?.message ?? "")
+        }
         .task {
             refreshWindowVisibility()
             if connection.state == .idle {
