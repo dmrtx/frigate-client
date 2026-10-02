@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 — full web dashboard
+
+- Replace native camera playback with Frigate's full web interface for every installation.
+- Remove the native camera grid, stream parser, decoder, mode switch, and obsolete playback tests.
+- Preserve saved connections, certificate approvals, browser sessions, and automatic failover.
+- Keep the menu bar window, minimal title bar, and playback suspension only when hidden, minimized, or closed.
+- Retain bounded browser recovery and add web-mode migration and hosted-window regression tests.
+
+
 ## 0.4.0 — native camera grid
 
 - Show all cameras in an adaptive native grid, with independent stream selection and reconnection.
@@ -9,7 +18,7 @@
 - Add hosted three-camera recovery, nine-camera scrolling, camera switching, and missing-keyframe regression tests.
 - Verify a locally installed app through Computer Use and measure simultaneous synthetic streams.
 
-This remains a prerelease. Real-camera testing found intermittent upstream streams; all-camera and all-day reliability are not yet established.
+This was a prerelease. The native client did not sustain all three real feeds despite the web dashboard working; version 0.5.0 replaces that playback path.
 
 ## 0.3.0 — native playback by default
 

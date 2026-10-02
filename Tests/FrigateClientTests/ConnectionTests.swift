@@ -42,7 +42,6 @@ func invalidAddressesAreRejected(_ value: String) {
     #expect(connection.backup.isEmpty)
     #expect(connection.state == .idle)
     #expect(connection.activeServer == nil)
-    #expect(connection.nativeEnabled)
     #expect(connection.webView == nil)
 }
 

@@ -52,3 +52,15 @@ final class PageWatchdog {
         recover()
     }
 }
+
+/// Bound page replacement when the same dashboard repeatedly stops responding.
+struct PageRecoveryBudget {
+    private var failures: [Date] = []
+    mutating func retry(afterFailureAt now: Date = .now) -> TimeInterval? {
+        failures.removeAll { now.timeIntervalSince($0) >= 300 }
+        failures.append(now)
+        guard failures.count <= 3 else { return nil }
+        return RetryPolicy().delay(after: failures.count - 1)
+    }
+    mutating func reset() { failures.removeAll() }
+}

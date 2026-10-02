@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import SwiftUI
 import Network
 import Testing
 import WebKit
@@ -86,10 +88,19 @@ private final class PageFixture: @unchecked Sendable {
                 return
             }
             if text.contains("fixture-session=preserved") { self.sawSession = true }
-            let body = text.hasPrefix("GET /api/version ") ? "test-version" :
-                "<html><body><button onclick='this.textContent=\"Responsive\"'>Check</button></body></html>"
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
+            let payload: Data
+            let contentType: String
+            if text.hasPrefix("GET /video.mp4 ") {
+                payload = (try? Data(contentsOf: Bundle.module.url(forResource: "web-video", withExtension: "mp4", subdirectory: "Resources")!)) ?? Data()
+                contentType = "video/mp4"
+            } else {
+                let body = text.hasPrefix("GET /api/version ") ? "test-version" :
+                    "<html><body><video muted autoplay loop src='/video.mp4'></video><button onclick='this.textContent=\"Responsive\"'>Check</button></body></html>"
+                payload = Data(body.utf8)
+                contentType = "text/html"
+            }
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
+            connection.send(content: Data(response.utf8) + payload, completion: .contentProcessed { _ in connection.cancel() })
         }
     }
 }
@@ -120,7 +131,6 @@ private func stallPage(_ view: WKWebView) {
         .domain: "127.0.0.1", .path: "/", .expires: Date.now.addingTimeInterval(3600)])!
     await store.httpCookieStore.setCookie(session)
     let connection = ConnectionController(defaults: defaults, websiteDataStore: store)
-    connection.setNativeEnabled(false)
     #expect(connection.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
     try await eventually { connection.state == .connected }
     let oldView = try #require(connection.webView) // SwiftUI can retain the old view until its next update.
@@ -150,7 +160,6 @@ private func stallPage(_ view: WKWebView) {
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
     let connection = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent())
-    connection.setNativeEnabled(false)
     #expect(connection.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
     defer { connection.setViewVisible(false) }
     try await eventually { connection.state == .connected }
@@ -169,4 +178,76 @@ private func stallPage(_ view: WKWebView) {
     connection.reconnect()
     try await eventually { connection.state == .connected && connection.webView?.url != nil }
     #expect(!connection.pageRecoveryPaused)
+}
+
+@MainActor @Test func existingNativePreferencesStillOpenTheFullWebDashboard() async throws {
+    let fixture = try PageFixture()
+    defer { fixture.stop() }
+    try await eventually { fixture.port != nil }
+    let suite = "WebMigrationTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set(true, forKey: "nativeLiveEnabled")
+    defaults.set(true, forKey: "nativeShowAllCameras")
+    let connection = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent())
+    #expect(connection.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
+    defer { connection.setViewVisible(false) }
+    try await eventually { connection.state == .connected }
+    let view = try #require(connection.webView)
+    let result = try await view.evaluateJavaScript("document.querySelector('button').textContent")
+    #expect(result as? String == "Check")
+}
+
+@MainActor @Test func hostedWebWindowSuspendsOnlyWhenHiddenMinimizedOrClosed() async throws {
+    let fixture = try PageFixture()
+    defer { fixture.stop() }
+    try await eventually { fixture.port != nil }
+    let suite = "WebWindowTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let connection = ConnectionController(defaults: defaults, websiteDataStore: .nonPersistent())
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                          styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = NSHostingView(rootView: ContentView(connection: connection, showingSettings: .constant(false)))
+    window.makeKeyAndOrderFront(nil)
+    #expect(connection.connect(primary: "http://127.0.0.1:\(fixture.port!)") == nil)
+    defer { connection.setViewVisible(false); window.close() }
+    try await eventually { connection.state == .connected && connection.window === window }
+    let view = try #require(connection.webView)
+    for _ in 0..<100 {
+        if await view.requestMediaPlaybackState() == .playing { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(await view.requestMediaPlaybackState() == .playing)
+    window.miniaturize(nil)
+    try await eventually { window.isMiniaturized }
+    #expect(await view.requestMediaPlaybackState() == .suspended)
+    window.deminiaturize(nil)
+    try await eventually { !window.isMiniaturized }
+    #expect(await view.requestMediaPlaybackState() != .suspended)
+    connection.hideWindow()
+    #expect(await view.requestMediaPlaybackState() == .suspended)
+    window.makeKeyAndOrderFront(nil)
+    try await eventually { window.isVisible }
+    // KVO and WebKit resume asynchronously when the window reappears.
+    for _ in 0..<100 {
+        if await view.requestMediaPlaybackState() != .suspended { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(await view.requestMediaPlaybackState() != .suspended)
+    window.close()
+    #expect(await view.requestMediaPlaybackState() == .suspended)
+}
+
+@Test func pageRecoveryBudgetExpiresAndCanBeReset() {
+    var budget = PageRecoveryBudget()
+    let now = Date(timeIntervalSince1970: 1000)
+    #expect(budget.retry(afterFailureAt: now) == 2)
+    #expect(budget.retry(afterFailureAt: now) == 4)
+    #expect(budget.retry(afterFailureAt: now) == 8)
+    #expect(budget.retry(afterFailureAt: now) == nil)
+    #expect(budget.retry(afterFailureAt: now.addingTimeInterval(300)) == 2)
+    budget.reset()
+    #expect(budget.retry(afterFailureAt: now.addingTimeInterval(301)) == 2)
 }

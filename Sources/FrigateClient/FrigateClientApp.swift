@@ -68,8 +68,6 @@ private struct FrigateMenu: View {
         .keyboardShortcut(",", modifiers: .command)
         Button("Reconnect") { connection.reconnect() }
             .disabled(connection.primary.isEmpty)
-        Toggle("Native live view", isOn: Binding(get: { connection.nativeEnabled },
-            set: { connection.setNativeEnabled($0) }))
         Divider()
         Button("Quit Frigate") { NSApp.terminate(nil) }
             .keyboardShortcut("q", modifiers: .command)
@@ -87,9 +85,7 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            if connection.nativeEnabled && !connection.requiresSignIn {
-                NativeLiveView(connection: connection)
-            } else if let webView = connection.webView {
+            if let webView = connection.webView {
                 FrigateWebView(webView: webView)
                     .id(ObjectIdentifier(webView))
                     .opacity(connection.state == .connected ? 1 : 0.15)
