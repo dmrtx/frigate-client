@@ -27,12 +27,18 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var certificate: CertificateRequest?
     private(set) var requiresSignIn = false
     private(set) var pageRecoveryPaused = false
+    private(set) var downloadNotice: DownloadNotice?
+    func dismissDownloadNotice() { downloadNotice = nil }
     @ObservationIgnored private(set) weak var window: NSWindow?
     @ObservationIgnored private var windowVisibility: NSKeyValueObservation?
     @ObservationIgnored private var appVisibility: AnyCancellable?
     @ObservationIgnored private var wakeEvents: AnyCancellable?
     private(set) var webView: WKWebView?
 
+    @ObservationIgnored private let downloadDestination: DashboardDownloads.DestinationChooser?
+    @ObservationIgnored private lazy var downloads = DashboardDownloads(
+        window: { [weak self] in self?.window }, chooseDestination: downloadDestination,
+        notify: { [weak self] in self?.downloadNotice = $0 })
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let probeSessions = ProbeSessionPool()
     @ObservationIgnored private let healthProbe: HealthProbe
@@ -62,7 +68,9 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     init(defaults: UserDefaults = .standard, websiteDataStore: WKWebsiteDataStore = .default(),
          wakeNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
-         navigationTimeout: Duration = .seconds(20)) {
+         navigationTimeout: Duration = .seconds(20),
+         downloadDestination: DashboardDownloads.DestinationChooser? = nil) {
+        self.downloadDestination = downloadDestination
         navigationDeadline = NavigationDeadline(timeout: navigationTimeout)
         self.defaults = defaults
         self.websiteDataStore = websiteDataStore
@@ -418,6 +426,12 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+        guard webView === self.webView else { decisionHandler(.cancel); return }
+        if action.shouldPerformDownload {
+            let allowed = action.request.url.flatMap { url in activeServer.map { DownloadPolicy.allows(url, server: $0) } } ?? false
+            decisionHandler(allowed ? .download : .cancel)
+            return
+        }
         guard action.targetFrame?.isMainFrame != false, let url = action.request.url,
               ["http", "https"].contains(url.scheme) else {
             decisionHandler(.allow)
@@ -432,11 +446,36 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
-        if response.isForMainFrame, let http = response.response as? HTTPURLResponse,
+        guard webView === self.webView else { decisionHandler(.cancel); return }
+        if !DownloadPolicy.isAttachment(response.response), response.isForMainFrame,
+           let http = response.response as? HTTPURLResponse,
            http.statusCode >= 500 {
             markOffline("Frigate returned error \(http.statusCode).", pageFailed: true)
             decisionHandler(.cancel)
+        } else if !response.canShowMIMEType || DownloadPolicy.isAttachment(response.response) {
+            let allowed = response.response.url.flatMap { url in activeServer.map { DownloadPolicy.allows(url, server: $0) } } ?? false
+            decisionHandler(allowed ? .download : .cancel)
         } else { decisionHandler(.allow) }
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        // Action conversion precedes provisional navigation, so it cannot finish a pending page load.
+        beginDownload(download, in: webView, completesNavigation: false)
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        beginDownload(download, in: webView, completesNavigation: navigationResponse.isForMainFrame)
+    }
+
+    private func beginDownload(_ download: WKDownload, in view: WKWebView, completesNavigation: Bool) {
+        guard view === webView, let activeServer else { download.cancel { _ in }; return }
+        if completesNavigation {
+            navigationDeadline.cancel()
+            navigation = nil
+            state = .connected
+            detail = ""
+        }
+        downloads.start(download, server: activeServer, fingerprint: trustedFingerprint(for: activeServer))
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
