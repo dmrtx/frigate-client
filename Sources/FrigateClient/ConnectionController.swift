@@ -55,13 +55,15 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     @ObservationIgnored private var rejectedServers: Set<String> = []
     @ObservationIgnored private var pageFailures = PageFailurePolicy()
     @ObservationIgnored private var finishTrust: ((Bool) -> Void)?
-    @ObservationIgnored private var loadStarted: Date?
+    @ObservationIgnored private let navigationDeadline: NavigationDeadline
     @ObservationIgnored private var viewIsVisible = true
     @ObservationIgnored private var hiddenSince: Date?
     @ObservationIgnored private var pageLoadedWhileHidden = false
 
     init(defaults: UserDefaults = .standard, websiteDataStore: WKWebsiteDataStore = .default(),
-         wakeNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter) {
+         wakeNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
+         navigationTimeout: Duration = .seconds(20)) {
+        navigationDeadline = NavigationDeadline(timeout: navigationTimeout)
         self.defaults = defaults
         self.websiteDataStore = websiteDataStore
         primary = defaults.string(forKey: "primaryURL") ?? Self.defaultPrimary
@@ -146,7 +148,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         detail = "Looking for Frigate…"
         nextRetry = nil
         failures = 0
-        loadStarted = nil
+        navigationDeadline.cancel()
         let id = runID
         monitor = Task { [weak self] in await self?.watchConnection(id: id) }
         return nil
@@ -224,6 +226,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     private func releaseBrowser() {
+        navigationDeadline.cancel()
+        navigation = nil
         webView?.navigationDelegate = nil
         webView?.uiDelegate = nil
         webView?.stopLoading()
@@ -284,12 +288,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
             case .reconnecting:
                 nextRetry = nil
                 await attemptConnection(id: id)
-            case .connecting:
-                if certificate == nil, let loadStarted, Date().timeIntervalSince(loadStarted) > 20 {
-                    webView?.stopLoading()
-                    navigation = nil
-                    markOffline("Frigate took too long to respond.", pageFailed: true)
-                }
+            case .connecting: break
             case .idle: break
             }
         }
@@ -311,11 +310,20 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         state = .connecting
         detail = server == servers.primary ? "Connecting over the local network…" : "Connecting over Tailscale…"
         nextRetry = nil
-        loadStarted = Date()
         let page = lastPages[server.origin].flatMap { server.isRestorablePage($0) ? $0 : nil } ?? server.url
         let view = webView ?? makeBrowser()
         navigation = view.load(URLRequest(url: page, cachePolicy: .reloadIgnoringLocalCacheData,
                                              timeoutInterval: 12))
+        startNavigationDeadline()
+    }
+
+    private func startNavigationDeadline() {
+        guard certificate == nil, let view = webView, let navigation else { return }
+        navigationDeadline.start { [weak self, weak view] in
+            guard let self, let view, view === self.webView,
+                  navigation === self.navigation, self.certificate == nil else { return }
+            self.markOffline("Frigate took too long to respond.", pageFailed: true)
+        }
     }
 
     private func probe(_ server: ServerAddress) async -> HealthProbe.Result {
@@ -329,7 +337,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         state = .reconnecting
         releaseBrowser()
         detail = message
-        loadStarted = nil
+        navigationDeadline.cancel()
     }
 
     private func rememberCurrentPage() {
@@ -353,8 +361,8 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         certificate = nil
         finishTrust = nil
         completion?(accept)
-        // Time spent reviewing a certificate is not a navigation timeout.
-        loadStarted = Date()
+        // Give navigation a fresh deadline after the user finishes reviewing trust.
+        startNavigationDeadline()
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -363,7 +371,9 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         // Internal Frigate navigation has its own navigation object.
         self.navigation = navigation
         pageLoadedWhileHidden = !viewIsVisible
-        loadStarted = Date()
+        state = .connecting
+        detail = "Loading Frigate…"
+        startNavigationDeadline()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -375,7 +385,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
         detail = ""
         failures = 0
         nextRetry = nil
-        loadStarted = nil
+        navigationDeadline.cancel()
         if viewIsVisible && pageLoadedWhileHidden {
             // Autoplay attempted while WebKit was suspended may never restart on resume.
             // Create the player while visible instead of leaving that page frozen.
@@ -455,6 +465,7 @@ final class ConnectionController: NSObject, WKNavigationDelegate, WKUIDelegate {
             completionHandler(.useCredential, URLCredential(trust: trust))
         } else if let fingerprint = ServerTrust.fingerprint(trust), !rejectedServers.contains(server.origin) {
             resolveCertificate(accept: false)
+            navigationDeadline.cancel()
             certificate = CertificateRequest(server: server, fingerprint: fingerprint)
             finishTrust = { accept in
                 completionHandler(accept ? .useCredential : .cancelAuthenticationChallenge,
